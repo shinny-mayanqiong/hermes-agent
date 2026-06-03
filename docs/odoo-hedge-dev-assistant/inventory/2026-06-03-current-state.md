@@ -72,13 +72,93 @@ WARNING: proceeding, even though we could not update PATH: Read-only file system
 
 已观察：
 
-- 当前 shell 中 `command -v hermes` 没有输出。
+- 在激活 `/home/user/Repos/hermes-agent/.venv` 后：
+
+```text
+/home/user/Repos/hermes-agent/.venv/bin/hermes
+Hermes Agent v0.15.1 (2026.5.29)
+```
 
 结论：
 
-- `hermes` 命令当前没有可靠出现在 PATH。
-- 下一步必须先确认 Hermes 是源码运行、editable install、pip install，还是需要补
-  shell PATH。
+- Hermes CLI 已在项目 `.venv` 中可用。
+- 使用 Hermes 前应先执行：
+
+```bash
+cd /home/user/Repos/hermes-agent
+source .venv/bin/activate
+```
+
+## `odoo-hedge-dev` profile
+
+用户已创建 profile：
+
+```text
+odoo-hedge-dev
+```
+
+已观察：
+
+```text
+Profile: odoo-hedge-dev
+Path:    /home/user/.hermes/profiles/odoo-hedge-dev
+Model:   gpt-5.5 (openai-codex)
+Gateway: stopped
+Skills:  90
+.env:    exists
+SOUL.md: exists
+Alias:   /home/user/.local/bin/odoo-hedge-dev
+```
+
+profile 配置文件：
+
+```text
+/home/user/.hermes/profiles/odoo-hedge-dev/config.yaml
+```
+
+关键配置：
+
+- `model.provider: openai-codex`
+- `model.default: gpt-5.5`
+- `agent.max_turns: 150`
+- `terminal.backend: local`
+- `terminal.cwd: .`
+
+结论：
+
+- `odoo-hedge-dev` profile 已创建。
+- profile alias 已创建：`/home/user/.local/bin/odoo-hedge-dev`。
+- profile 仍需把 `terminal.cwd` 从 `.` 改为 `/home/user/Repos/odoo-hedge`。
+- 后续需要验证 alias 是否在普通 shell 的 PATH 中可直接运行。
+
+## OpenAI Codex OAuth
+
+曾观察到 `odoo-hedge-dev` profile 调用 `openai-codex` 时返回：
+
+```text
+HTTP 401
+token_expired
+Provided authentication token is expired. Please try signing in again.
+```
+
+处理方式：
+
+```bash
+cd /home/user/Repos/hermes-agent
+source .venv/bin/activate
+
+hermes -p odoo-hedge-dev auth logout openai-codex
+hermes -p odoo-hedge-dev auth add openai-codex
+```
+
+用户确认：
+
+- 重新登录后已成功。
+
+结论：
+
+- `openai-codex` token 过期时，`auth status` 显示 logged in 不一定代表调用可用。
+- 遇到 `token_expired`，优先在当前 profile 下重新 `auth add openai-codex`。
 
 ## 现有业务用户 skills
 

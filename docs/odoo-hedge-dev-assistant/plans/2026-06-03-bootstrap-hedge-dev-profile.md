@@ -58,6 +58,15 @@ Codex CLI 已可用：
 
 ## 阶段 1：确认 Hermes CLI 可用性
 
+状态：已完成基础验证。
+
+已确认：
+
+```text
+/home/user/Repos/hermes-agent/.venv/bin/hermes
+Hermes Agent v0.15.1 (2026.5.29)
+```
+
 ### 操作
 
 确认 `hermes` 命令来源：
@@ -90,9 +99,25 @@ hermes --help
 
 ## 阶段 2：建立 `odoo-hedge` 专用 profile
 
+状态：已创建，仍需配置工作目录。
+
+已确认：
+
+```text
+Profile: odoo-hedge-dev
+Path:    /home/user/.hermes/profiles/odoo-hedge-dev
+Model:   gpt-5.5 (openai-codex)
+Alias:   /home/user/.local/bin/odoo-hedge-dev
+```
+
+当前缺口：
+
+- `terminal.cwd` 仍为 `.`。
+- 需要改为 `/home/user/Repos/odoo-hedge`。
+
 ### 操作
 
-创建或选择一个 profile，例如：
+使用已创建的 profile：
 
 ```text
 odoo-hedge-dev
