@@ -122,14 +122,43 @@ profile 配置文件：
 - `model.default: gpt-5.5`
 - `agent.max_turns: 150`
 - `terminal.backend: local`
-- `terminal.cwd: .`
+- `terminal.cwd: /home/user/Repos/odoo-hedge`
 
 结论：
 
 - `odoo-hedge-dev` profile 已创建。
 - profile alias 已创建：`/home/user/.local/bin/odoo-hedge-dev`。
-- profile 仍需把 `terminal.cwd` 从 `.` 改为 `/home/user/Repos/odoo-hedge`。
+- profile 已配置为在 `/home/user/Repos/odoo-hedge` 工作。
 - 后续需要验证 alias 是否在普通 shell 的 PATH 中可直接运行。
+
+## 多角色开发 profiles
+
+已从 `odoo-hedge-dev` clone 出 6 个角色 profiles：
+
+- `odoo-hedge-orchestrator`
+- `odoo-hedge-architect`
+- `odoo-hedge-design-reviewer`
+- `odoo-hedge-coder`
+- `odoo-hedge-spec-reviewer`
+- `odoo-hedge-qa`
+
+这些 profiles 继承了：
+
+- `model.provider: openai-codex`
+- `model.default: gpt-5.5`
+- `terminal.cwd: /home/user/Repos/odoo-hedge`
+
+已创建首批 role skills：
+
+- `~/.hermes/profiles/odoo-hedge-orchestrator/skills/dev/odoo-hedge-orchestrator/SKILL.md`
+- `~/.hermes/profiles/odoo-hedge-coder/skills/dev/odoo-hedge-coder/SKILL.md`
+
+验证结果：
+
+- `hermes -p odoo-hedge-orchestrator skills list` 可看到
+  `odoo-hedge-orchestrator`，状态为 enabled。
+- `hermes -p odoo-hedge-coder skills list` 可看到 `odoo-hedge-coder`，
+  状态为 enabled。
 
 ## OpenAI Codex OAuth
 
@@ -255,8 +284,7 @@ hermes -p odoo-hedge-dev auth add openai-codex
 
 ## 下一步建议
 
-1. 修复或确认 `hermes` CLI 可用性。
-2. 创建 `odoo-hedge` 专用 Hermes profile。
-3. 将 `terminal.cwd` 指向 `/home/user/Repos/odoo-hedge`。
-4. 研究 `.codex` skills 接入 Hermes 的方式。
-5. 创建开发人员专用 Hermes skills，而不是复用业务用户 domain skills。
+1. 为 Architect、Design Reviewer、Spec Reviewer、QA 补充 role skills。
+2. 定义第一版固定 Kanban 流程模板。
+3. 运行一个低风险 dry run。
+4. 接入 Slack 通知。

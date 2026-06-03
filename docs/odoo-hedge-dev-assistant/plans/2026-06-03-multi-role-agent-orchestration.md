@@ -21,18 +21,21 @@ Hermes 编排层。
 - `terminal.cwd` 已由用户确认完成配置。
 - `openai-codex` auth 已重新登录成功。
 - Codex 是开发主力。
+- `odoo-hedge-dev` Kanban board 已由用户确认创建。
+- 6 个角色 profiles 已创建。
+- 首批 2 个 role skills 已创建：
+  `odoo-hedge-orchestrator`、`odoo-hedge-coder`。
 
 待完成：
 
-- 创建角色 profiles。
-- 创建角色 skills。
-- 初始化 Kanban board。
 - 定义固定流程模板。
 - 接入通知。
+- 为 Architect、Design Reviewer、Spec Reviewer、QA 补充 role skills。
+- 运行一次低风险 dry run。
 
 ## 阶段 1：定义角色 profiles
 
-建议创建这些 profiles：
+已创建这些 profiles：
 
 ```text
 odoo-hedge-orchestrator
@@ -60,7 +63,7 @@ hermes profile describe odoo-hedge-orchestrator --text "<description>"
 
 ## 阶段 2：定义各角色 skill
 
-建议创建：
+目标 skills：
 
 ```text
 odoo-hedge-orchestrator
@@ -73,6 +76,18 @@ odoo-hedge-qa
 
 这些是开发人员 workflow skills，不复用业务用户
 `~/.hermes/skills/domain/odoo-hedge*`。
+
+已创建：
+
+- `~/.hermes/profiles/odoo-hedge-orchestrator/skills/dev/odoo-hedge-orchestrator/SKILL.md`
+- `~/.hermes/profiles/odoo-hedge-coder/skills/dev/odoo-hedge-coder/SKILL.md`
+
+待创建：
+
+- `odoo-hedge-architect`
+- `odoo-hedge-design-reviewer`
+- `odoo-hedge-spec-reviewer`
+- `odoo-hedge-qa`
 
 ### Orchestrator skill
 
