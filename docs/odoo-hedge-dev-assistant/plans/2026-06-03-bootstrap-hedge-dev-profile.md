@@ -99,7 +99,7 @@ hermes --help
 
 ## 阶段 2：建立 `odoo-hedge` 专用 profile
 
-状态：已创建，仍需配置工作目录。
+状态：已创建，用户已确认工作目录配置完成。
 
 已确认：
 
@@ -110,10 +110,10 @@ Model:   gpt-5.5 (openai-codex)
 Alias:   /home/user/.local/bin/odoo-hedge-dev
 ```
 
-当前缺口：
+当前结论：
 
-- `terminal.cwd` 仍为 `.`。
-- 需要改为 `/home/user/Repos/odoo-hedge`。
+- `terminal.cwd` 已由用户确认配置完成。
+- 下一步进入多角色 agent 编排设计与迁移。
 
 ### 操作
 
