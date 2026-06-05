@@ -260,6 +260,39 @@ The gateway runs as a long-lived process, managed via:
 
 **Profile-scoped vs global**: `start_gateway()` uses profile-scoped PID files. `hermes gateway stop` stops only the current profile's gateway. `hermes gateway stop --all` uses global `ps aux` scanning to kill all gateway processes (used during updates).
 
+## Backlog
+
+### Slack Socket inbound forwarding rules
+
+Slack Socket Mode can receive channel and DM messages, but Hermes currently routes
+them either into the normal agent dispatch path or drops them during Slack
+mention/channel gating. Operators who want "when Slack receives X, forward it to
+Y" need to write a `pre_gateway_dispatch` plugin today.
+
+Desired follow-up: add a config-driven inbound forwarding layer for Slack socket
+events, with rules that can match source channel, user, message type, thread
+state, and text patterns, then deliver the rendered message through the existing
+gateway delivery path. Rules should support both modes:
+
+- **Forward and continue** — mirror the message to another platform/channel, then
+  keep normal agent processing.
+- **Forward and skip agent** — deliver the message and return
+  `{"action": "skip"}`-equivalent behavior so no LLM turn runs.
+
+Implementation notes:
+
+- The feature must run after Slack has normalized raw events into `MessageEvent`
+  so it can reuse source metadata and attachment-enriched text.
+- Slack's `require_mention`, `free_response_channels`, and `allowed_channels`
+  gates run before `pre_gateway_dispatch`; either document that source channels
+  must opt in, or add an explicit forwarding pre-gate if the intended behavior is
+  to observe unmentioned messages without making the bot conversational there.
+- Reuse the existing adapter send/delivery machinery instead of adding
+  Slack-specific REST calls.
+- Cover loop prevention, especially Slack-to-Slack forwarding and bot-originated
+  messages.
+- Add docs in the Slack guide once the config shape is finalized.
+
 ## Related Docs
 
 - [Session Storage](./session-storage.md)
