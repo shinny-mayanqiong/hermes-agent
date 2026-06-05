@@ -25,13 +25,18 @@ Hermes 编排层。
 - 6 个角色 profiles 已创建。
 - 首批 2 个 role skills 已创建：
   `odoo-hedge-orchestrator`、`odoo-hedge-coder`。
+- 2026-06-03 已完成一次 dry run：
+  `t_59d472cd -> t_59351c2e -> t_e4f8c861 -> t_1bc39a54 -> t_39050508 -> t_56e913d9`。
+  结果：Design Reviewer `approved=true`，Spec Reviewer
+  `spec_compliance=true`，QA `qa_passed=true`。
 
 待完成：
 
-- 定义固定流程模板。
+- 将固定流程升级为 issue -> worktree -> code -> PR -> CI -> PR comments
+  的 delivery workflow。
 - 接入通知。
 - 为 Architect、Design Reviewer、Spec Reviewer、QA 补充 role skills。
-- 运行一次低风险 dry run。
+- 运行一次低风险真实 delivery，从 issue 到 PR。
 
 ## 阶段 1：定义角色 profiles
 
@@ -181,6 +186,10 @@ hermes gateway start
 ```
 
 ## 阶段 4：固定流程模板
+
+完整 delivery workflow 见：
+
+- `plans/2026-06-04-delivery-workflow-v1.md`
 
 ### 小任务模板
 

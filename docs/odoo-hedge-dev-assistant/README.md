@@ -40,6 +40,22 @@ The goal is to build an incremental, maintainable setup where Hermes can support
 `/home/user/Repos/odoo-hedge/hedge_docs/` 为事实源；本目录只记录 Hermes
 开发助手系统本身的搭建、使用和改进。
 
+## Current Workflow Entry
+
+当前 delivery workflow 入口：
+
+- `plans/2026-06-04-delivery-workflow-v1.md`
+
+用户提出真实开发需求后，默认创建一个 Kanban root delivery task，由
+`odoo-hedge-orchestrator` 编排 issue、worktree、plan、implementation、review、
+QA、PR、CI、PR comments 和 closeout。
+
+查看过程：
+
+- Dashboard：`/kanban`
+- CLI：`hermes -p odoo-hedge-dev kanban --board odoo-hedge-dev list`
+- 单任务详情：`hermes -p odoo-hedge-dev kanban --board odoo-hedge-dev show <task_id>`
+
 ## First Milestones
 
 1. Make the `hermes` command reliable on this development machine.
