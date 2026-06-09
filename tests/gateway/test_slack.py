@@ -364,6 +364,43 @@ class TestSlackSocketWatchdog:
     assert the adapter heals itself without touching real network/Slack.
     """
 
+    @pytest.mark.asyncio
+    async def test_stop_cancels_socket_task_before_closing_handler(self):
+        """Cancel start_async before closing the SDK client session.
+
+        Slack SDK's aiohttp SocketModeClient reconnect loop keeps retrying
+        inside connect(). If the client session is closed first, that loop can
+        log "Session is closed" repeatedly until the task is cancelled.
+        """
+        adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-fake"))
+        events: list[str] = []
+
+        class FakeTask:
+            def done(self):
+                return False
+
+            def cancel(self):
+                events.append("cancel")
+
+            def __await__(self):
+                async def _wait():
+                    events.append("await_task")
+
+                return _wait().__await__()
+
+        class FakeHandler:
+            async def close_async(self):
+                events.append("close")
+
+        adapter._handler = FakeHandler()
+        adapter._socket_mode_task = FakeTask()
+
+        await adapter._stop_socket_mode_handler()
+
+        assert events == ["cancel", "await_task", "close"]
+        assert adapter._handler is None
+        assert adapter._socket_mode_task is None
+
     def _make_fake_handler_factory(self):
         """Return ``(factory, instances)`` where each call records a handler."""
         instances: list = []
