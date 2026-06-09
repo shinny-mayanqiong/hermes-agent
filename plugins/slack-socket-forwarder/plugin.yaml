@@ -1,0 +1,5 @@
+name: slack-socket-forwarder
+version: "0.1.0"
+description: "Forward selected Slack socket actions to an internal service."
+author: "Hermes Agent"
+kind: standalone
