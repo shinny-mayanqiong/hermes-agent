@@ -468,7 +468,21 @@ def gateway_help_lines() -> list[str]:
     return lines
 
 
-def _iter_plugin_command_entries() -> list[tuple[str, str, str]]:
+def _plugin_command_supports_platform(meta: dict[str, Any], platform: str | None) -> bool:
+    platforms = meta.get("platforms")
+    if not platforms:
+        return True
+    if platform is None:
+        return True
+    normalized = {
+        str(p or "").strip().lower()
+        for p in platforms
+        if str(p or "").strip()
+    }
+    return platform.lower() in normalized
+
+
+def _iter_plugin_command_entries(platform: str | None = None) -> list[tuple[str, str, str]]:
     """Yield (name, description, args_hint) tuples for all plugin slash commands.
 
     Plugin commands are registered via
@@ -493,6 +507,8 @@ def _iter_plugin_command_entries() -> list[tuple[str, str, str]]:
     entries: list[tuple[str, str, str]] = []
     for name, meta in commands.items():
         if not isinstance(name, str) or not isinstance(meta, dict):
+            continue
+        if not _plugin_command_supports_platform(meta, platform):
             continue
         description = str(meta.get("description") or f"Run /{name}")
         args_hint = str(meta.get("args_hint") or "").strip()
@@ -525,7 +541,7 @@ def telegram_bot_commands() -> list[tuple[str, str]]:
         tg_name = _sanitize_telegram_name(cmd.name)
         if tg_name:
             result.append((tg_name, cmd.description))
-    for name, description, args_hint in _iter_plugin_command_entries():
+    for name, description, args_hint in _iter_plugin_command_entries(platform="telegram"):
         if _requires_argument(args_hint):
             continue
         tg_name = _sanitize_telegram_name(name)
@@ -712,10 +728,13 @@ def _collect_gateway_skill_entries(
         from hermes_cli.plugins import get_plugin_commands
         plugin_cmds = get_plugin_commands()
         for cmd_name in sorted(plugin_cmds):
+            meta = plugin_cmds.get(cmd_name) or {}
+            if isinstance(meta, dict) and not _plugin_command_supports_platform(meta, platform):
+                continue
             name = sanitize_name(cmd_name) if sanitize_name else cmd_name
             if not name:
                 continue
-            desc = plugin_cmds[cmd_name].get("description", "Plugin command")
+            desc = meta.get("description", "Plugin command") if isinstance(meta, dict) else "Plugin command"
             if len(desc) > desc_limit:
                 desc = desc[:desc_limit - 3] + "..."
             plugin_pairs.append((name, desc))
@@ -1154,7 +1173,7 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
             _add(alias, f"Alias for /{cmd.name} — {cmd.description}", cmd.args_hint or "")
 
     # Third pass: plugin commands.
-    for name, description, args_hint in _iter_plugin_command_entries():
+    for name, description, args_hint in _iter_plugin_command_entries(platform="slack"):
         _add(name, description, args_hint or "")
 
     return entries
@@ -1204,7 +1223,7 @@ def slack_subcommand_map() -> dict[str, str]:
         mapping[cmd.name] = f"/{cmd.name}"
         for alias in cmd.aliases:
             mapping[alias] = f"/{alias}"
-    for name, _description, _args_hint in _iter_plugin_command_entries():
+    for name, _description, _args_hint in _iter_plugin_command_entries(platform="slack"):
         if name not in mapping:
             mapping[name] = f"/{name}"
     return mapping

@@ -885,6 +885,13 @@ DEFAULT_CONFIG = {
     "providers": {},
     "fallback_providers": [],
     "credential_pool_strategies": {},
+    "plugins": {
+        # This deployment ships the Odoo Hedge Server Slack workflow as a
+        # default-on business plugin. Operators can remove it from
+        # plugins.enabled or add it to plugins.disabled to opt out.
+        "enabled": ["odoo-hedge-server"],
+        "disabled": [],
+    },
     "toolsets": ["hermes-cli"],
     # Global active chat session cap across CLI, TUI/dashboard, and messaging.
     # None/0 = unbounded.

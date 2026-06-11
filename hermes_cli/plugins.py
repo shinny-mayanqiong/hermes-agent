@@ -465,6 +465,7 @@ class PluginContext:
         handler: Callable,
         description: str = "",
         args_hint: str = "",
+        platforms: tuple[str, ...] | list[str] | set[str] | None = None,
     ) -> None:
         """Register a slash command (e.g. ``/lcm``) available in CLI and gateway sessions.
 
@@ -481,6 +482,11 @@ class PluginContext:
         command picker. Plugin commands without ``args_hint`` register as
         parameterless in Discord and still accept trailing text when invoked
         as free-form chat.
+
+        ``platforms`` optionally limits native gateway menu surfacing to the
+        named platforms (for example ``("slack",)``). Dispatch lookup still
+        works by command name; platform-specific hooks should enforce runtime
+        routing.
 
         Names conflicting with built-in commands are rejected with a warning.
         """
@@ -510,6 +516,11 @@ class PluginContext:
             "description": description or "Plugin command",
             "plugin": self.manifest.name,
             "args_hint": (args_hint or "").strip(),
+            "platforms": tuple(
+                str(p or "").strip().lower()
+                for p in (platforms or ())
+                if str(p or "").strip()
+            ),
         }
         logger.debug("Plugin %s registered command: /%s", self.manifest.name, clean)
 

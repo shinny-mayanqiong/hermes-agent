@@ -1,0 +1,7 @@
+name: odoo-hedge-server
+version: "0.1.0"
+description: "Start and collect Slack Odoo Hedge Server requests."
+author: "Hermes Agent"
+kind: standalone
+hooks:
+  - pre_gateway_dispatch

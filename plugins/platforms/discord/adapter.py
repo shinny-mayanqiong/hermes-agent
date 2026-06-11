@@ -3708,7 +3708,7 @@ class DiscordAdapter(BasePlatformAdapter):
         try:
             from hermes_cli.commands import _iter_plugin_command_entries
 
-            for plugin_name, plugin_desc, plugin_args_hint in _iter_plugin_command_entries():
+            for plugin_name, plugin_desc, plugin_args_hint in _iter_plugin_command_entries(platform="discord"):
                 discord_name = plugin_name.lower()[:32]
                 if discord_name in already_registered:
                     continue
