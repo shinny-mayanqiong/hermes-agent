@@ -1021,16 +1021,15 @@ class SlackAdapter(BasePlatformAdapter):
             # routes the command event through the socket regardless of the
             # manifest's request URL, but it will not deliver an event for
             # a slash command the manifest doesn't declare.
-            from hermes_cli.commands import slack_native_slashes
             import re as _re
 
-            _slash_names = [name for name, _d, _h in slack_native_slashes()]
-            if _slash_names:
-                _slash_pattern = _re.compile(
-                    r"^/(?:" + "|".join(_re.escape(n) for n in _slash_names) + r")$"
-                )
-            else:  # pragma: no cover - registry always non-empty
-                _slash_pattern = _re.compile(r"^/hermes$")
+            # ACK any slash command Slack delivers to this app, then let the
+            # gateway dispatcher decide whether it is known. The app manifest
+            # is still the source of which commands Slack will deliver, but a
+            # broad handler prevents plugin command load-order/cache drift from
+            # turning newly-added commands into Slack's "app did not respond"
+            # timeout.
+            _slash_pattern = _re.compile(r"^/[a-z0-9][a-z0-9_-]{0,31}$")
 
             @self._app.command(_slash_pattern)
             async def handle_hermes_command(ack, command):

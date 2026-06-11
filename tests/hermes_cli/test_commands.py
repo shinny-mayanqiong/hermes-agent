@@ -304,6 +304,29 @@ class TestSlackNativeSlashes:
         slashes = slack_native_slashes()
         assert slashes[0][0] == "hermes"
 
+    def test_plugin_commands_follow_hermes_catchall(self, monkeypatch):
+        """Custom Slack plugin commands should get priority after /hermes."""
+        from hermes_cli import plugins as _plugins_mod
+
+        monkeypatch.setattr(
+            _plugins_mod,
+            "get_plugin_commands",
+            lambda: {
+                "odoo-hedge-server": {
+                    "handler": lambda _a: "ok",
+                    "description": "Start an Odoo Hedge Server Slack workflow",
+                    "args_hint": "<text>",
+                    "plugin": "odoo-hedge-server",
+                    "platforms": ("slack",),
+                }
+            },
+        )
+
+        slashes = slack_native_slashes()
+
+        assert slashes[0][0] == "hermes"
+        assert slashes[1][0] == "odoo-hedge-server"
+
     def test_names_respect_slack_limits(self):
         for name, _desc, _hint in slack_native_slashes():
             # Slack: lowercase a-z, 0-9, hyphens, underscores; max 32 chars

@@ -210,6 +210,23 @@ def _slack_client(adapter: Any, chat_id: str) -> Any:
     return getattr(app, "client", None)
 
 
+def _slack_response_data(response: Any) -> dict[str, Any]:
+    if isinstance(response, dict):
+        return response
+    data = getattr(response, "data", None)
+    if isinstance(data, dict):
+        return data
+    getter = getattr(response, "get", None)
+    if callable(getter):
+        result: dict[str, Any] = {}
+        for key in ("ok", "ts", "channel", "message", "error"):
+            value = getter(key)
+            if value is not None:
+                result[key] = value
+        return result
+    return {}
+
+
 async def _post_slack_message(
     adapter: Any,
     chat_id: str,
@@ -226,7 +243,7 @@ async def _post_slack_message(
     if thread_ts:
         kwargs["thread_ts"] = thread_ts
     response = await client.chat_postMessage(**kwargs)
-    return response if isinstance(response, dict) else {}
+    return _slack_response_data(response)
 
 
 def _remember_slack_thread(adapter: Any, thread_ts: str, message_ts: str = "") -> None:

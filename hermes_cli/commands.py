@@ -1051,6 +1051,7 @@ def discord_skill_commands_by_category(
 _SLACK_MAX_SLASH_COMMANDS = 50
 _SLACK_NAME_LIMIT = 32
 _SLACK_INVALID_CHARS = re.compile(r"[^a-z0-9_\-]")
+_SLACK_PRIORITY_ALIASES = ("reset", "bg", "btw", "q")
 _SLACK_RESERVED_COMMANDS = frozenset({
     # Built-in Slack slash commands that cannot be registered by apps.
     # https://slack.com/help/articles/201259356-Use-built-in-slash-commands
@@ -1157,24 +1158,32 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
         if cmd is not None:
             _add(alias, f"Alias for /{cmd.name} — {cmd.description}", cmd.args_hint or "")
 
-    # First pass: canonical names (so they win slots if we hit the cap).
+    plugin_entries = _iter_plugin_command_entries(platform="slack")
+
+    # First pass: custom/plugin commands. These are usually installation-
+    # specific workflows, so keep them ahead of the core command list when
+    # Slack's 50-command cap applies.
+    for name, description, args_hint in plugin_entries:
+        _add(name, description, args_hint or "")
+
+    # Second pass: canonical names.
     for cmd in COMMAND_REGISTRY:
         if not _is_gateway_available(cmd, overrides):
             continue
         _add(cmd.name, cmd.description, cmd.args_hint or "")
 
-    # Second pass: aliases.
+    priority_aliases = set(_SLACK_PRIORITY_ALIASES)
+
+    # Third pass: remaining aliases.
     for cmd in COMMAND_REGISTRY:
         if not _is_gateway_available(cmd, overrides):
             continue
         for alias in cmd.aliases:
+            if alias in priority_aliases:
+                continue
             # Skip aliases that only differ from canonical by case/punctuation
             # normalization (already covered by _add dedup).
             _add(alias, f"Alias for /{cmd.name} — {cmd.description}", cmd.args_hint or "")
-
-    # Third pass: plugin commands.
-    for name, description, args_hint in _iter_plugin_command_entries(platform="slack"):
-        _add(name, description, args_hint or "")
 
     return entries
 

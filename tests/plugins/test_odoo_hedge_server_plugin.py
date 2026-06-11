@@ -36,12 +36,24 @@ class FakeSlackClient:
     def __init__(self):
         self.messages = []
         self._counter = 100
+        self.response_wrapper = None
 
     async def chat_postMessage(self, **kwargs):
         self._counter += 1
         ts = f"{self._counter}.000"
         self.messages.append({**kwargs, "ts": ts})
-        return {"ok": True, "ts": ts}
+        response = {"ok": True, "ts": ts}
+        if self.response_wrapper:
+            return self.response_wrapper(response)
+        return response
+
+
+class FakeSlackResponse:
+    def __init__(self, data):
+        self._data = dict(data)
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
 
 
 class FakeSlackAdapter:
@@ -140,6 +152,24 @@ async def test_command_creates_thread_and_asks_for_missing_version(tmp_path, mon
     assert "请在此 thread 回复想要部署的 Odoo 版本" in reply["text"]
     assert root["ts"] in adapter._bot_message_ts
     adapter._send_slash_ephemeral.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_command_accepts_slack_response_object(tmp_path, monkeypatch):
+    plugin = _load_plugin()
+    monkeypatch.setattr(plugin, "_state_path", lambda: tmp_path / "state.json")
+    adapter = FakeSlackAdapter()
+    adapter.client.response_wrapper = FakeSlackResponse
+
+    await plugin._handle_odoo_event(
+        _event("/odoo-hedge-server 创建一个服务"),
+        _gateway(adapter),
+    )
+
+    root = adapter.client.messages[0]
+    reply = adapter.client.messages[1]
+    assert reply["thread_ts"] == root["ts"]
+    assert (tmp_path / "state.json").exists()
 
 
 @pytest.mark.asyncio
