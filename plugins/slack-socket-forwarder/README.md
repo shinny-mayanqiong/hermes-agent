@@ -7,7 +7,6 @@ Default behavior:
 
 - Action IDs: `create_issue`, `create_issue_and_pr`
 - Target URL: `http://192.168.139.8:9000/internal/slack/socket-interactions`
-- Token header: `X-ZQ-Internal-Token`
 
 Enable the plugin:
 
@@ -21,9 +20,7 @@ Optional environment overrides:
 
 ```bash
 SLACK_SOCKET_FORWARD_URL="http://192.168.139.8:9000/internal/slack/socket-interactions"
-SLACK_SOCKET_INTERNAL_TOKEN="shared-secret"
 SLACK_SOCKET_FORWARD_ACTION_IDS="create_issue,create_issue_and_pr"
-SLACK_SOCKET_FORWARD_TOKEN_HEADER="X-ZQ-Internal-Token"
 SLACK_SOCKET_FORWARD_TIMEOUT_SECONDS="10"
 ```
 

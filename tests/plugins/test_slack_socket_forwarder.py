@@ -84,7 +84,6 @@ async def test_forward_action_posts_to_configured_target(monkeypatch):
         "SLACK_SOCKET_FORWARD_URL",
         "http://192.168.139.8:9000/internal/slack/socket-interactions",
     )
-    monkeypatch.setenv("SLACK_SOCKET_INTERNAL_TOKEN", "secret-token")
 
     seen = {}
 
@@ -148,4 +147,4 @@ async def test_forward_action_posts_to_configured_target(monkeypatch):
         "channel_id": "C456",
         "message_ts": "171.123",
     }
-    assert seen["kwargs"]["headers"] == {"X-ZQ-Internal-Token": "secret-token"}
+    assert "headers" not in seen["kwargs"]

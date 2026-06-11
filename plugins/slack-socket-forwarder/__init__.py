@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FORWARD_URL = "http://192.168.139.8:9000/internal/slack/socket-interactions"
 DEFAULT_ACTION_IDS = ("create_issue", "create_issue_and_pr")
-DEFAULT_TOKEN_HEADER = "X-ZQ-Internal-Token"
 DEFAULT_TIMEOUT_SECONDS = 10.0
 
 _PATCHED = False
@@ -81,19 +80,11 @@ async def _post_forward_payload(payload: dict[str, str]) -> dict[str, Any]:
         logger.warning("[slack-socket-forwarder] No forward URL configured")
         return {"ok": False, "error": "missing_forward_url"}
 
-    headers: dict[str, str] = {}
-    token = (os.getenv("SLACK_SOCKET_INTERNAL_TOKEN") or "").strip()
-    if token:
-        header_name = (
-            os.getenv("SLACK_SOCKET_FORWARD_TOKEN_HEADER") or DEFAULT_TOKEN_HEADER
-        ).strip() or DEFAULT_TOKEN_HEADER
-        headers[header_name] = token
-
     import aiohttp
 
     timeout = aiohttp.ClientTimeout(total=_configured_timeout())
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(target_url, json=payload, headers=headers) as response:
+        async with session.post(target_url, json=payload) as response:
             response_text = await response.text()
             if response.status >= 400:
                 raise RuntimeError(
