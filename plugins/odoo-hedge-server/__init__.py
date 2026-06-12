@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
-import re
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -21,42 +22,12 @@ logger = logging.getLogger(__name__)
 COMMAND_NAME = "odoo-hedge-server"
 COMMAND_PREFIX = f"/{COMMAND_NAME}"
 ALT_COMMAND_PREFIX = f"!{COMMAND_NAME}"
+SKILL_NAME = "odoo-hedge-server"
+TOOLSET_NAME = "odoo_hedge_server"
 DEFAULT_API_BASE_URL = "http://127.0.0.1:18080"
-DEFAULT_API_TIMEOUT_SECONDS = 30.0
+DEFAULT_API_TIMEOUT_SECONDS = 1200.0
 
 _STATE_LOCK = asyncio.Lock()
-
-_INTENT_LABELS = {
-    "create": "创建服务",
-    "destroy": "销毁服务",
-    "upgrade": "升级服务",
-    "status": "列状态",
-    "unknown": "未识别",
-}
-
-_VERSION_RE = re.compile(
-    r"(?<![A-Za-z0-9_.])v?(?P<major>1[0-9]|2[0-9])(?:\.(?P<minor>\d+))?(?![A-Za-z0-9_.])",
-    re.IGNORECASE,
-)
-_TAG_RE = re.compile(r"(?<![\w.])(?P<tag>\d+\.\d+\.\d+)(?![\w.])")
-_COMMIT_RE = re.compile(r"(?<![A-Fa-f0-9])(?P<commit>[A-Fa-f0-9]{7,40})(?![A-Fa-f0-9])")
-_BRANCH_FIELD_RE = re.compile(
-    r"(?:branch|分支)\s*[:=：]?\s*(?P<value>[A-Za-z0-9][A-Za-z0-9._/-]{0,127})",
-    re.IGNORECASE,
-)
-_COMMIT_FIELD_RE = re.compile(
-    r"(?:commit|提交)\s*[:=：]?\s*(?P<value>[A-Fa-f0-9]{7,40})",
-    re.IGNORECASE,
-)
-_TAG_FIELD_RE = re.compile(
-    r"(?:tag|标签)\s*[:=：]?\s*(?P<value>\d+\.\d+\.\d+)",
-    re.IGNORECASE,
-)
-_SLUG_FIELD_RE = re.compile(
-    r"(?:slug|sandbox|沙盒|实例|服务)\s*[:=：]\s*(?P<value>[A-Za-z0-9][A-Za-z0-9_.-]{1,127})",
-    re.IGNORECASE,
-)
-_SLUG_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{1,127}$")
 
 
 def _state_path() -> Path:
@@ -188,8 +159,82 @@ def _api_request_sync(method: str, path: str, body: dict[str, Any] | None = None
         raise SandboxApiError(f"HTTP 服务调用失败：{exc}") from exc
 
 
-async def _api_request(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
-    return await asyncio.to_thread(_api_request_sync, method, path, body)
+def _tool_payload(ok: bool, **fields: Any) -> str:
+    payload = {"ok": ok}
+    payload.update(fields)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _tool_error(exc: SandboxApiError) -> str:
+    return _tool_payload(
+        False,
+        status=exc.status,
+        code=exc.code,
+        message=exc.message,
+        error={
+            "status": exc.status,
+            "code": exc.code,
+            "message": exc.message,
+            "details": exc.details,
+        },
+        details=exc.details,
+    )
+
+
+def _clean_arg(args: dict[str, Any], key: str) -> str:
+    value = args.get(key)
+    return str(value).strip() if value is not None else ""
+
+
+def _odoo_sandbox_create_tool(args: dict[str, Any], **_: Any) -> str:
+    body = _create_body(args)
+    try:
+        data = _api_request_sync("POST", "/sandboxes", body)
+    except SandboxApiError as exc:
+        return _tool_error(exc)
+    return _tool_payload(True, status="created", data=data)
+
+
+def _odoo_sandbox_provision_sync_defaults_tool(args: dict[str, Any], **_: Any) -> str:
+    slug = _clean_arg(args, "slug")
+    if not slug:
+        return _tool_payload(False, message="Missing required slug", error={"code": "missing_slug"})
+    try:
+        data = _api_request_sync("POST", f"/sandboxes/{quote(slug, safe='')}/provision-sync-defaults")
+    except SandboxApiError as exc:
+        return _tool_error(exc)
+    return _tool_payload(True, status="provisioned", data=data)
+
+
+def _odoo_sandbox_list_tool(args: dict[str, Any], **_: Any) -> str:
+    del args
+    try:
+        data = _api_request_sync("GET", "/sandboxes")
+    except SandboxApiError as exc:
+        return _tool_error(exc)
+    return _tool_payload(True, status="listed", data=data)
+
+
+def _odoo_sandbox_get_tool(args: dict[str, Any], **_: Any) -> str:
+    slug = _clean_arg(args, "slug")
+    if not slug:
+        return _tool_payload(False, message="Missing required slug", error={"code": "missing_slug"})
+    try:
+        data = _api_request_sync("GET", f"/sandboxes/{quote(slug, safe='')}")
+    except SandboxApiError as exc:
+        return _tool_error(exc)
+    return _tool_payload(True, status="found", data=data)
+
+
+def _odoo_sandbox_destroy_tool(args: dict[str, Any], **_: Any) -> str:
+    slug = _clean_arg(args, "slug")
+    if not slug:
+        return _tool_payload(False, message="Missing required slug", error={"code": "missing_slug"})
+    try:
+        data = _api_request_sync("POST", f"/sandboxes/{quote(slug, safe='')}/destroy")
+    except SandboxApiError as exc:
+        return _tool_error(exc)
+    return _tool_payload(True, status="destroyed", data=data)
 
 
 def _platform_value(source: Any) -> str:
@@ -234,204 +279,14 @@ def _command_args(text: str) -> str | None:
     return None
 
 
-def _parse_version(text: str) -> str:
-    match = _VERSION_RE.search(text or "")
-    if not match:
-        return ""
-    major = match.group("major")
-    minor = match.group("minor")
-    return f"{major}.{minor}" if minor is not None else f"{major}.0"
-
-
-def _match_value(pattern: re.Pattern[str], text: str, group: str = "value") -> str:
-    match = pattern.search(text or "")
-    return str(match.group(group) or "").strip() if match else ""
-
-
-def _parse_tag(text: str) -> str:
-    explicit = _match_value(_TAG_FIELD_RE, text)
-    if explicit:
-        return explicit
-    return _match_value(_TAG_RE, text, "tag")
-
-
-def _parse_commit(text: str) -> str:
-    explicit = _match_value(_COMMIT_FIELD_RE, text)
-    if explicit:
-        return explicit
-    return _match_value(_COMMIT_RE, text, "commit")
-
-
-def _parse_branch(text: str, version: str) -> str:
-    explicit = _match_value(_BRANCH_FIELD_RE, text)
-    if explicit:
-        return explicit
-    return version
-
-
-def _parse_slug(text: str, intent: str) -> str:
-    explicit = _match_value(_SLUG_FIELD_RE, text)
-    if explicit:
-        return explicit
-    if intent == "create":
-        return ""
-    ignored = {
-        "delete",
-        "destroy",
-        "remove",
-        "status",
-        "list",
-        "get",
-        "upgrade",
-        "update",
-        "sandbox",
-    }
-    for raw_token in re.split(r"[\s,，。:：]+", text or ""):
-        token = raw_token.strip("`'\"“”‘’()[]{}<>")
-        if not token:
-            continue
-        lowered = token.lower()
-        if lowered in ignored:
-            continue
-        if any(word in token for word in ("销毁", "删除", "关闭", "停止", "状态", "列状态", "查看", "升级", "更新", "沙盒", "实例", "服务")):
-            continue
-        if _SLUG_TOKEN_RE.fullmatch(token):
-            return token
-    return ""
-
-
-def _parse_intent(text: str) -> str:
-    lowered = (text or "").lower()
-    if any(token in lowered for token in ("状态", "列状态", "查看", "list", "status")):
-        return "status"
-    if any(token in lowered for token in ("升级", "更新", "upgrade")):
-        return "upgrade"
-    if any(token in lowered for token in ("销毁", "删除", "关闭", "停止", "destroy", "delete", "remove")):
-        return "destroy"
-    if any(token in lowered for token in ("创建", "部署", "新建", "启动", "create", "deploy", "start")):
-        return "create"
-    return "unknown"
-
-
-def _parse_request(text: str) -> dict[str, str]:
-    intent = _parse_intent(text)
-    version = _parse_version(text)
-    tag = _parse_tag(text)
-    commit = "" if tag else _parse_commit(text)
-    branch = "" if tag else _parse_branch(text, version)
-    return {
-        "intent": intent,
-        "version": version,
-        "branch": branch,
-        "commit": commit,
-        "tag": tag,
-        "slug": _parse_slug(text, intent),
-        "raw_text": (text or "").strip(),
-    }
-
-
-def _has_create_target(record: dict[str, Any]) -> bool:
-    return any(str(record.get(key) or "").strip() for key in ("branch", "commit", "tag"))
-
-
-def _has_actionable_fields(parsed: dict[str, str]) -> bool:
-    return any(parsed.get(key) for key in ("branch", "commit", "tag", "slug", "version"))
-
-
 def _format_user(user_name: str, user_id: str) -> str:
     if user_name and user_id and user_name != user_id:
         return f"{user_name} (`{user_id}`)"
     return user_id or user_name or "unknown"
 
 
-def _format_sandbox_record(record: dict[str, Any]) -> str:
-    lines: list[str] = []
-    for label, key in (
-        ("slug", "slug"),
-        ("状态", "status"),
-        ("URL", "url"),
-        ("owner", "owner"),
-        ("branch", "branch"),
-        ("commit", "commit"),
-        ("tag", "tag"),
-        ("image", "image_tag"),
-        ("sync defaults", "sync_defaults_status"),
-    ):
-        value = record.get(key)
-        if value is None or value == "":
-            continue
-        if key in {"slug", "commit", "tag", "branch", "image_tag"}:
-            lines.append(f"- {label}：`{value}`")
-        else:
-            lines.append(f"- {label}：{value}")
-    last_error = str(record.get("last_error") or "").strip()
-    if last_error:
-        lines.append(f"- last_error：{last_error}")
-    sync_error = str(record.get("sync_defaults_error") or "").strip()
-    if sync_error:
-        lines.append(f"- sync_defaults_error：{sync_error}")
-    return "\n".join(lines) if lines else "- 返回：无详情"
-
-
-def _format_sandbox_list(records: Any) -> str:
-    if not isinstance(records, list):
-        return "HTTP 服务返回了非预期的状态列表格式。"
-    if not records:
-        return "当前没有 sandbox。"
-    lines = ["当前 sandbox："]
-    for item in records[:10]:
-        if not isinstance(item, dict):
-            continue
-        slug = str(item.get("slug") or "unknown")
-        status = str(item.get("status") or "unknown")
-        url = str(item.get("url") or "")
-        owner = str(item.get("owner") or "")
-        suffix = f" - {url}" if url else ""
-        owner_text = f" ({owner})" if owner else ""
-        lines.append(f"- `{slug}`：{status}{owner_text}{suffix}")
-    if len(records) > 10:
-        lines.append(f"... 还有 {len(records) - 10} 个未显示")
-    return "\n".join(lines)
-
-
-def _format_target_prompt(record: dict[str, Any]) -> str:
-    return "\n".join(
-        [
-            "已创建 Odoo Hedge Server 操作线程。",
-            f"用户：{_format_user(str(record.get('user_name') or ''), str(record.get('user_id') or ''))}",
-            f"我理解你的意图是：{_INTENT_LABELS.get(str(record.get('intent') or 'unknown'), '未识别')}。",
-            "请在此 thread 回复要部署的 branch、commit 或 tag，例如 `17.0`、`abcdef1` 或 `2026.6.1`。",
-        ]
-    )
-
-
-def _format_slug_prompt(record: dict[str, Any]) -> str:
-    return "\n".join(
-        [
-            "已创建 Odoo Hedge Server 操作线程。",
-            f"用户：{_format_user(str(record.get('user_name') or ''), str(record.get('user_id') or ''))}",
-            f"我理解你的意图是：{_INTENT_LABELS.get(str(record.get('intent') or 'unknown'), '未识别')}。",
-            "请在此 thread 回复 sandbox slug，例如 `odoo-demo-123`。",
-        ]
-    )
-
-
-def _format_unknown_prompt() -> str:
-    return "请说明要执行的操作：创建、销毁或列状态。创建时可提供 branch/commit/tag；销毁时请提供 sandbox slug。"
-
-
-def _format_api_error(exc: SandboxApiError) -> str:
-    parts = []
-    if exc.status is not None:
-        parts.append(str(exc.status))
-    if exc.code:
-        parts.append(exc.code)
-    suffix = f"（{' '.join(parts)}）" if parts else ""
-    return f"HTTP 服务调用失败{suffix}：{exc.message}"
-
-
 def _owner_for_api(record: dict[str, Any]) -> str:
-    return str(record.get("user_name") or record.get("user_id") or "").strip()
+    return str(record.get("owner") or record.get("user_name") or record.get("user_id") or "").strip()
 
 
 def _create_body(record: dict[str, Any]) -> dict[str, Any]:
@@ -439,55 +294,16 @@ def _create_body(record: dict[str, Any]) -> dict[str, Any]:
     owner = _owner_for_api(record)
     if owner:
         body["owner"] = owner
+    slug = str(record.get("slug") or "").strip()
+    if slug:
+        body["slug"] = slug
+    if str(record.get("use_default") or "").strip():
+        return body
     for key in ("branch", "commit", "tag"):
         value = str(record.get(key) or "").strip()
         if value:
             body[key] = value
     return body
-
-
-async def _execute_record(record: dict[str, Any]) -> str:
-    intent = str(record.get("intent") or "unknown")
-    record["pending"] = ""
-    try:
-        if intent == "create":
-            if not _has_create_target(record):
-                record["pending"] = "create_target"
-                return _format_target_prompt(record)
-            result = await _api_request("POST", "/sandboxes", _create_body(record))
-            if isinstance(result, dict):
-                record["slug"] = str(result.get("slug") or record.get("slug") or "")
-                return "已创建 Odoo sandbox：\n" + _format_sandbox_record(result)
-            return "已创建 Odoo sandbox，但 HTTP 服务返回了非预期格式。"
-
-        if intent == "destroy":
-            slug = str(record.get("slug") or "").strip()
-            if not slug:
-                record["pending"] = "slug"
-                return _format_slug_prompt(record)
-            result = await _api_request("POST", f"/sandboxes/{quote(slug, safe='')}/destroy")
-            if isinstance(result, dict):
-                return "已调用销毁接口：\n" + _format_sandbox_record(result)
-            return f"已调用销毁接口：`{slug}`"
-
-        if intent == "status":
-            slug = str(record.get("slug") or "").strip()
-            if slug:
-                result = await _api_request("GET", f"/sandboxes/{quote(slug, safe='')}")
-                if isinstance(result, dict):
-                    return "Sandbox 状态：\n" + _format_sandbox_record(result)
-                return "HTTP 服务返回了非预期的状态格式。"
-            return _format_sandbox_list(await _api_request("GET", "/sandboxes"))
-
-        if intent == "upgrade":
-            return (
-                "当前 HTTP API 未暴露升级接口；OpenAPI 里可用的是创建、销毁、列状态、"
-                "查询单个 sandbox 和 provision-sync-defaults。"
-            )
-
-        return _format_unknown_prompt()
-    except SandboxApiError as exc:
-        return _format_api_error(exc)
 
 
 async def _resolve_user_name(adapter: Any, event: Any) -> str:
@@ -577,7 +393,7 @@ async def _replace_slash_ack(adapter: Any, chat_id: str, content: str) -> None:
         logger.debug("[odoo-hedge-server] Failed to replace Slack slash ack: %s", exc)
 
 
-def _base_record(event: Any, user_name: str, parsed: dict[str, str]) -> dict[str, Any]:
+def _base_record(event: Any, user_name: str, raw_text: str) -> dict[str, Any]:
     source = getattr(event, "source", None)
     return {
         "team_id": _team_id(event),
@@ -585,41 +401,116 @@ def _base_record(event: Any, user_name: str, parsed: dict[str, str]) -> dict[str
         "thread_ts": str(getattr(source, "thread_id", "") or ""),
         "user_id": str(getattr(source, "user_id", "") or ""),
         "user_name": user_name,
-        "intent": parsed.get("intent", "unknown"),
-        "version": parsed.get("version", ""),
-        "branch": parsed.get("branch", ""),
-        "commit": parsed.get("commit", ""),
-        "tag": parsed.get("tag", ""),
-        "slug": parsed.get("slug", ""),
-        "raw_text": parsed.get("raw_text", ""),
+        "raw_text": (raw_text or "").strip(),
         "created_at": time.time(),
         "updated_at": time.time(),
-        "pending": "",
     }
 
 
-def _register_gateway_thread_session(event: Any, gateway: Any, thread_ts: str) -> None:
-    session_store = getattr(gateway, "session_store", None)
-    if session_store is None or not hasattr(session_store, "get_or_create_session"):
-        return
-    source = getattr(event, "source", None)
-    try:
-        from gateway.session import SessionSource
+def _merge_auto_skill(existing: Any) -> str | list[str]:
+    if not existing:
+        return SKILL_NAME
+    names = [existing] if isinstance(existing, str) else list(existing)
+    deduped: list[str] = []
+    for name in [*names, SKILL_NAME]:
+        if isinstance(name, str) and name and name not in deduped:
+            deduped.append(name)
+    return deduped[0] if len(deduped) == 1 else deduped
 
-        session_store.get_or_create_session(
-            SessionSource(
-                platform=getattr(source, "platform", None),
-                chat_id=str(getattr(source, "chat_id", "") or ""),
-                chat_name=getattr(source, "chat_name", None),
-                chat_type=str(getattr(source, "chat_type", "") or "group"),
-                user_id=str(getattr(source, "user_id", "") or "") or None,
-                user_name=getattr(source, "user_name", None),
-                thread_id=thread_ts,
-                guild_id=_team_id(event) or None,
-            )
-        )
-    except Exception as exc:
-        logger.debug("[odoo-hedge-server] Failed to register gateway thread session: %s", exc)
+
+def _thread_channel_prompt(record: dict[str, Any]) -> str:
+    user_name = str(record.get("user_name") or "")
+    user_id = str(record.get("user_id") or "")
+    return "\n".join(
+        [
+            "[Odoo Hedge Server Slack thread]",
+            "This thread was opened by /odoo-hedge-server. Treat messages here as Odoo sandbox lifecycle requests.",
+            f"Slack requester: {_format_user(user_name, user_id)}. Use this requester as the create owner unless the user corrects it.",
+            "Users do not need to repeat /odoo-hedge-server inside this thread.",
+        ]
+    )
+
+
+def _apply_odoo_thread_context(event: Any, record: dict[str, Any]) -> None:
+    try:
+        event.auto_skill = _merge_auto_skill(getattr(event, "auto_skill", None))
+    except Exception:
+        pass
+    prompt = _thread_channel_prompt(record)
+    try:
+        existing = str(getattr(event, "channel_prompt", "") or "").strip()
+        event.channel_prompt = f"{existing}\n\n{prompt}" if existing else prompt
+    except Exception:
+        pass
+
+
+def _thread_source(source: Any, thread_ts: str) -> Any:
+    try:
+        if dataclasses.is_dataclass(source):
+            return dataclasses.replace(source, thread_id=thread_ts)
+    except Exception:
+        pass
+    data: dict[str, Any] = {}
+    try:
+        data.update(vars(source))
+    except TypeError:
+        pass
+    for key in (
+        "platform",
+        "chat_id",
+        "chat_name",
+        "chat_type",
+        "user_id",
+        "user_name",
+        "guild_id",
+    ):
+        if key not in data:
+            data[key] = getattr(source, key, None)
+    data["thread_id"] = thread_ts
+    return SimpleNamespace(**data)
+
+
+def _build_thread_event(event: Any, text: str, thread_ts: str, record: dict[str, Any]) -> Any:
+    from gateway.platforms.base import MessageEvent, MessageType
+
+    raw = dict(_raw_dict(event))
+    raw["text"] = text
+    raw["thread_ts"] = thread_ts
+    raw.setdefault("team_id", record.get("team_id") or "")
+    synthetic = MessageEvent(
+        text=text,
+        message_type=MessageType.TEXT,
+        source=_thread_source(getattr(event, "source", None), thread_ts),
+        raw_message=raw,
+        message_id=f"odoo-hedge-server:{thread_ts}:initial",
+        reply_to_message_id=thread_ts,
+    )
+    _apply_odoo_thread_context(synthetic, record)
+    return synthetic
+
+
+async def _dispatch_thread_event(event: Any, gateway: Any, adapter: Any, thread_ts: str, record: dict[str, Any]) -> bool:
+    text = str(record.get("raw_text") or "").strip()
+    if not text:
+        return False
+    synthetic = _build_thread_event(event, text, thread_ts, record)
+    handler = getattr(adapter, "handle_message", None) or getattr(gateway, "_handle_message", None)
+    if handler is None:
+        return False
+    result = handler(synthetic)
+    if asyncio.iscoroutine(result):
+        await result
+    return True
+
+
+def _format_thread_prompt(record: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "请直接在此 thread 描述要创建、销毁或查询的 Odoo 服务。",
+            f"当前用户：{_format_user(str(record.get('user_name') or ''), str(record.get('user_id') or ''))}",
+            "创建示例：`创建默认值`、`创建 2026.6.1`、`创建 abcdef123 slug demo-a`。",
+        ]
+    )
 
 
 async def _handle_command_start(event: Any, gateway: Any, args: str) -> None:
@@ -631,8 +522,7 @@ async def _handle_command_start(event: Any, gateway: Any, args: str) -> None:
         return
 
     user_name = await _resolve_user_name(adapter, event)
-    parsed = _parse_request(args)
-    record = _base_record(event, user_name, parsed)
+    record = _base_record(event, user_name, args)
 
     root_text = "\n".join(
         [
@@ -650,11 +540,11 @@ async def _handle_command_start(event: Any, gateway: Any, args: str) -> None:
         raise RuntimeError("Slack did not return a thread root timestamp")
     record["thread_ts"] = thread_ts
     record["updated_at"] = time.time()
-    _register_gateway_thread_session(event, gateway, thread_ts)
 
     key = _thread_key(event, thread_ts=thread_ts)
     async with _STATE_LOCK:
         state = await _load_state()
+        record["workflow"] = "agent"
         state.setdefault("threads", {})[key] = record
         await _save_state(state)
 
@@ -665,84 +555,16 @@ async def _handle_command_start(event: Any, gateway: Any, args: str) -> None:
         "已创建 Odoo Hedge Server thread，请在新 thread 中继续。",
     )
 
-    reply = await _execute_record(record)
-    record["updated_at"] = time.time()
-    async with _STATE_LOCK:
-        state = await _load_state()
-        state.setdefault("threads", {})[key] = record
-        await _save_state(state)
+    if args.strip():
+        dispatched = await _dispatch_thread_event(event, gateway, adapter, thread_ts, record)
+        if dispatched:
+            return
+        fallback = "已记录初始请求，但当前 gateway 无法自动接入 agent；请在此 thread 再回复一次需求。"
+    else:
+        fallback = _format_thread_prompt(record)
 
-    reply_response = await _post_slack_message(adapter, chat_id, reply, thread_ts=thread_ts)
+    reply_response = await _post_slack_message(adapter, chat_id, fallback, thread_ts=thread_ts)
     _remember_slack_thread(adapter, thread_ts, str(reply_response.get("ts") or ""))
-
-
-async def _handle_thread_message(event: Any, gateway: Any, key: str, record: dict[str, Any]) -> None:
-    source = getattr(event, "source", None)
-    chat_id = str(getattr(source, "chat_id", "") or "")
-    thread_ts = str(getattr(source, "thread_id", "") or "")
-    adapter = gateway.adapters.get(getattr(source, "platform", None))
-    if adapter is None or not chat_id or not thread_ts:
-        return
-
-    text = str(getattr(event, "text", "") or "").strip()
-    if text in {"取消", "结束", "cancel", "stop", "done"}:
-        async with _STATE_LOCK:
-            state = await _load_state()
-            state.setdefault("threads", {}).pop(key, None)
-            await _save_state(state)
-        await _post_slack_message(adapter, chat_id, "Odoo Hedge Server 操作线程已结束。", thread_ts=thread_ts)
-        return
-
-    parsed = _parse_request(text)
-    explicit_intent = parsed["intent"] != "unknown"
-    pending = str(record.get("pending") or "")
-    actionable = _has_actionable_fields(parsed)
-    if not explicit_intent and not actionable and not pending:
-        updated = dict(record)
-        updated["updated_at"] = time.time()
-        async with _STATE_LOCK:
-            state = await _load_state()
-            state.setdefault("threads", {})[key] = updated
-            await _save_state(state)
-        response = await _post_slack_message(adapter, chat_id, _format_unknown_prompt(), thread_ts=thread_ts)
-        _remember_slack_thread(adapter, thread_ts, str(response.get("ts") or ""))
-        return
-
-    carry_previous = not explicit_intent
-    if not explicit_intent:
-        parsed["intent"] = str(record.get("intent") or "unknown")
-    if carry_previous:
-        for field in ("version", "branch", "commit", "tag", "slug"):
-            if not parsed[field]:
-                parsed[field] = str(record.get(field) or "")
-
-    user_name = await _resolve_user_name(adapter, event)
-    updated = dict(record)
-    updated.update(
-        {
-            "user_id": str(getattr(source, "user_id", "") or record.get("user_id") or ""),
-            "user_name": user_name or str(record.get("user_name") or ""),
-            "intent": parsed["intent"],
-            "version": parsed["version"],
-            "branch": parsed["branch"],
-            "commit": parsed["commit"],
-            "tag": parsed["tag"],
-            "slug": parsed["slug"],
-            "raw_text": text or str(record.get("raw_text") or ""),
-            "updated_at": time.time(),
-        }
-    )
-
-    reply = await _execute_record(updated)
-    updated["updated_at"] = time.time()
-
-    async with _STATE_LOCK:
-        state = await _load_state()
-        state.setdefault("threads", {})[key] = updated
-        await _save_state(state)
-
-    response = await _post_slack_message(adapter, chat_id, reply, thread_ts=thread_ts)
-    _remember_slack_thread(adapter, thread_ts, str(response.get("ts") or ""))
 
 
 async def _handle_odoo_event(event: Any, gateway: Any) -> None:
@@ -755,16 +577,6 @@ async def _handle_odoo_event(event: Any, gateway: Any) -> None:
     if args is not None:
         await _handle_command_start(event, gateway, args)
         return
-
-    thread_ts = str(getattr(source, "thread_id", "") or "")
-    if not thread_ts:
-        return
-    key = _thread_key(event)
-    async with _STATE_LOCK:
-        state = await _load_state()
-        record = state.setdefault("threads", {}).get(key)
-    if isinstance(record, dict):
-        await _handle_thread_message(event, gateway, key, record)
 
 
 def _schedule_odoo_event(event: Any, gateway: Any) -> None:
@@ -807,46 +619,100 @@ def _pre_gateway_dispatch(event: Any, gateway: Any, **_: Any) -> dict[str, str] 
     if not thread_ts:
         return None
 
-    async def _is_active_thread() -> bool:
-        async with _STATE_LOCK:
-            state = await _load_state()
-            return _thread_key(event) in state.setdefault("threads", {})
-
-    async def _runner_if_active() -> None:
-        if await _is_active_thread():
-            await _handle_odoo_event(event, gateway)
-
-    # We need to know synchronously whether to skip gateway dispatch. Reading
-    # the small JSON state file here keeps the command path deterministic.
+    # pre_gateway_dispatch is synchronous, so read the small marker file
+    # directly. The actual conversation state lives in the gateway session.
     path = _state_path()
     if not path.exists():
         return None
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
-        active = _thread_key(event) in (state.get("threads") or {})
+        record = (state.get("threads") or {}).get(_thread_key(event))
+        active = isinstance(record, dict)
     except Exception:
+        record = None
         active = False
     if not active:
         return None
-    task = asyncio.create_task(_runner_if_active())
-    task.add_done_callback(
-        lambda done: logger.warning(
-            "[odoo-hedge-server] Slack thread handler failed: %s",
-            done.exception(),
-            exc_info=True,
-        )
-        if not done.cancelled() and done.exception()
-        else None
-    )
-    return {"action": "skip", "reason": "odoo-hedge-server-thread"}
+    _apply_odoo_thread_context(event, record or {})
+    return {"action": "allow"}
 
 
 def _usage(raw_args: str) -> str:
     del raw_args
     return (
-        "Usage: `/odoo-hedge-server 创建 abcdef1` 或 `/odoo-hedge-server 创建 2026.6.1`\n"
-        "Slack 中会创建一个专用 thread，后续直接在该 thread 回复 branch、commit、tag 或 slug。"
+        "Usage: `/odoo-hedge-server 创建 默认值` 或 `/odoo-hedge-server 创建 2026.6.1`\n"
+        "Slack 中会创建一个专用 thread，后续直接在该 thread 回复版本、commit、tag、默认值或 slug。"
     )
+
+
+_CREATE_SCHEMA = {
+    "name": "odoo_sandbox_create",
+    "description": "Create an Odoo sandbox through the Hedge Sandbox Control API.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "owner": {"type": "string", "description": "Slack requester name or user id."},
+            "slug": {"type": "string", "description": "Optional custom sandbox slug."},
+            "branch": {"type": "string", "description": "Source branch or version branch."},
+            "commit": {"type": "string", "description": "Source commit SHA."},
+            "tag": {"type": "string", "description": "Official release tag in year.month.release_count form."},
+        },
+        "additionalProperties": False,
+    },
+}
+
+_PROVISION_SCHEMA = {
+    "name": "odoo_sandbox_provision_sync_defaults",
+    "description": "Provision default Xinyi account settings for an Odoo sandbox.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "slug": {"type": "string", "description": "Sandbox slug returned by create or supplied by the user."},
+        },
+        "required": ["slug"],
+        "additionalProperties": False,
+    },
+}
+
+_LIST_SCHEMA = {
+    "name": "odoo_sandbox_list",
+    "description": "List Odoo sandboxes.",
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+}
+
+_GET_SCHEMA = {
+    "name": "odoo_sandbox_get",
+    "description": "Get one Odoo sandbox by slug.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "slug": {"type": "string", "description": "Sandbox slug."},
+        },
+        "required": ["slug"],
+        "additionalProperties": False,
+    },
+}
+
+_DESTROY_SCHEMA = {
+    "name": "odoo_sandbox_destroy",
+    "description": "Destroy one Odoo sandbox by slug.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "slug": {"type": "string", "description": "Sandbox slug to destroy."},
+        },
+        "required": ["slug"],
+        "additionalProperties": False,
+    },
+}
+
+_TOOLS = (
+    ("odoo_sandbox_create", _CREATE_SCHEMA, _odoo_sandbox_create_tool, "🧱"),
+    ("odoo_sandbox_provision_sync_defaults", _PROVISION_SCHEMA, _odoo_sandbox_provision_sync_defaults_tool, "🔐"),
+    ("odoo_sandbox_list", _LIST_SCHEMA, _odoo_sandbox_list_tool, "📋"),
+    ("odoo_sandbox_get", _GET_SCHEMA, _odoo_sandbox_get_tool, "🔎"),
+    ("odoo_sandbox_destroy", _DESTROY_SCHEMA, _odoo_sandbox_destroy_tool, "🗑️"),
+)
 
 
 def register(ctx) -> None:
@@ -854,7 +720,15 @@ def register(ctx) -> None:
         COMMAND_NAME,
         _usage,
         description="Start an Odoo Hedge Server Slack workflow",
-        args_hint="<创建|销毁|升级|状态> [branch|commit|tag|slug]",
+        args_hint="<创建|销毁|升级|状态> [版本|commit|tag|默认值|slug]",
         platforms=("slack",),
     )
+    for name, schema, handler, emoji in _TOOLS:
+        ctx.register_tool(
+            name=name,
+            toolset=TOOLSET_NAME,
+            schema=schema,
+            handler=handler,
+            emoji=emoji,
+        )
     ctx.register_hook("pre_gateway_dispatch", _pre_gateway_dispatch)

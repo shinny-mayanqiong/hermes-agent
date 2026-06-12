@@ -894,7 +894,7 @@ DEFAULT_CONFIG = {
     },
     "odoo_hedge_server": {
         "api_base_url": "http://127.0.0.1:18080",
-        "timeout_seconds": 30,
+        "timeout_seconds": 1200,
     },
     "toolsets": ["hermes-cli"],
     # Global active chat session cap across CLI, TUI/dashboard, and messaging.

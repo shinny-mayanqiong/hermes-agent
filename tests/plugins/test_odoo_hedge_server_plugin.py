@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -59,6 +60,7 @@ class FakeSlackResponse:
 class FakeSlackAdapter:
     def __init__(self):
         self.client = FakeSlackClient()
+        self.handled_events = []
         self._bot_message_ts = set()
         self._mentioned_threads = set()
         self._send_slash_ephemeral = AsyncMock()
@@ -77,6 +79,9 @@ class FakeSlackAdapter:
 
     def format_message(self, content):
         return content
+
+    async def handle_message(self, event):
+        self.handled_events.append(event)
 
 
 def _source(*, thread_id=None):
@@ -100,11 +105,10 @@ def _event(text, *, thread_id=None):
     )
 
 
-def _gateway(adapter):
+def _gateway(adapter, *, authorized=True):
     return SimpleNamespace(
         adapters={Platform.SLACK: adapter},
-        _is_user_authorized=lambda source: True,
-        session_store=SimpleNamespace(get_or_create_session=MagicMock()),
+        _is_user_authorized=lambda source: authorized,
     )
 
 
@@ -136,85 +140,175 @@ def _sandbox_record(**overrides):
     return record
 
 
-def test_parse_chinese_create_request_with_branch_version():
-    plugin = _load_plugin()
-
-    parsed = plugin._parse_request("创建一个 17.0 服务")
-
-    assert parsed["intent"] == "create"
-    assert parsed["version"] == "17.0"
-    assert parsed["branch"] == "17.0"
-    assert parsed["commit"] == ""
-    assert parsed["tag"] == ""
-
-
-def test_parse_create_commit_prefers_commit():
-    plugin = _load_plugin()
-
-    parsed = plugin._parse_request("创建 abcdef123456")
-
-    assert parsed["intent"] == "create"
-    assert parsed["commit"] == "abcdef123456"
-    assert parsed["tag"] == ""
-    assert parsed["branch"] == ""
-
-
-def test_parse_create_tag_three_numeric_parts():
-    plugin = _load_plugin()
-
-    parsed = plugin._parse_request("创建 2026.6.1")
-
-    assert parsed["intent"] == "create"
-    assert parsed["tag"] == "2026.6.1"
-    assert parsed["commit"] == ""
-    assert parsed["branch"] == ""
-
-
-def test_parse_destroy_slug():
-    plugin = _load_plugin()
-
-    parsed = plugin._parse_request("销毁 odoo-demo-1")
-
-    assert parsed["intent"] == "destroy"
-    assert parsed["slug"] == "odoo-demo-1"
-
-
-def test_parse_chinese_create_request_without_version():
-    plugin = _load_plugin()
-
-    parsed = plugin._parse_request("创建一个服务")
-
-    assert parsed["intent"] == "create"
-    assert parsed["version"] == ""
-
-
 def test_default_config_enables_plugin():
     from hermes_cli.config import DEFAULT_CONFIG
 
     assert "odoo-hedge-server" in DEFAULT_CONFIG["plugins"]["enabled"]
     assert DEFAULT_CONFIG["odoo_hedge_server"]["api_base_url"] == "http://127.0.0.1:18080"
+    assert DEFAULT_CONFIG["odoo_hedge_server"]["timeout_seconds"] == 1200
+
+
+def test_create_body_preserves_custom_slug_for_default_target():
+    plugin = _load_plugin()
+
+    body = plugin._create_body(
+        {
+            "user_name": "Alice",
+            "slug": "demo-a",
+            "use_default": "true",
+            "branch": "17.0",
+            "commit": "abcdef1",
+            "tag": "2026.6.1",
+        }
+    )
+
+    assert body == {"owner": "Alice", "slug": "demo-a"}
+
+
+def test_register_exposes_odoo_toolset_and_slack_hook():
+    plugin = _load_plugin()
+
+    class FakeCtx:
+        def __init__(self):
+            self.commands = []
+            self.tools = []
+            self.hooks = []
+
+        def register_command(self, *args, **kwargs):
+            self.commands.append((args, kwargs))
+
+        def register_tool(self, *args, **kwargs):
+            self.tools.append((args, kwargs))
+
+        def register_hook(self, *args, **kwargs):
+            self.hooks.append((args, kwargs))
+
+    ctx = FakeCtx()
+    plugin.register(ctx)
+
+    assert ctx.commands[0][0][0] == "odoo-hedge-server"
+    assert {call[1]["toolset"] for call in ctx.tools} == {"odoo_hedge_server"}
+    assert {call[1]["name"] for call in ctx.tools} == {
+        "odoo_sandbox_create",
+        "odoo_sandbox_provision_sync_defaults",
+        "odoo_sandbox_list",
+        "odoo_sandbox_get",
+        "odoo_sandbox_destroy",
+    }
+    assert ctx.hooks[0][0][0] == "pre_gateway_dispatch"
+
+
+def test_create_tool_posts_owner_slug_and_default_target(monkeypatch):
+    plugin = _load_plugin()
+    calls = []
+
+    def fake_api(method, path, body=None):
+        calls.append((method, path, body))
+        return _sandbox_record(slug=body["slug"], branch=None)
+
+    monkeypatch.setattr(plugin, "_api_request_sync", fake_api)
+
+    payload = json.loads(
+        plugin._odoo_sandbox_create_tool({"owner": "Alice", "slug": "demo-a"})
+    )
+
+    assert payload["ok"] is True
+    assert payload["data"]["slug"] == "demo-a"
+    assert calls == [("POST", "/sandboxes", {"owner": "Alice", "slug": "demo-a"})]
+
+
+def test_create_tool_returns_backend_error_details(monkeypatch):
+    plugin = _load_plugin()
+
+    def fake_api(method, path, body=None):
+        del method, path, body
+        raise plugin.SandboxApiError(
+            "Docker build failed while ensuring sandbox image.",
+            status=502,
+            code="docker_image_build_failed",
+            details={"image_ensure": {"error": "Dockerfile.sandbox not found"}},
+        )
+
+    monkeypatch.setattr(plugin, "_api_request_sync", fake_api)
+
+    payload = json.loads(plugin._odoo_sandbox_create_tool({"owner": "Alice"}))
+
+    assert payload["ok"] is False
+    assert payload["status"] == 502
+    assert payload["code"] == "docker_image_build_failed"
+    assert payload["details"]["image_ensure"]["error"] == "Dockerfile.sandbox not found"
+
+
+def test_provision_get_list_and_destroy_tools_call_expected_paths(monkeypatch):
+    plugin = _load_plugin()
+    calls = []
+
+    def fake_api(method, path, body=None):
+        calls.append((method, path, body))
+        if method == "GET" and path == "/sandboxes":
+            return [_sandbox_record()]
+        return _sandbox_record(slug="demo-a")
+
+    monkeypatch.setattr(plugin, "_api_request_sync", fake_api)
+
+    assert json.loads(plugin._odoo_sandbox_provision_sync_defaults_tool({"slug": "demo-a"}))["ok"]
+    assert json.loads(plugin._odoo_sandbox_get_tool({"slug": "demo-a"}))["ok"]
+    assert json.loads(plugin._odoo_sandbox_list_tool({}))["ok"]
+    assert json.loads(plugin._odoo_sandbox_destroy_tool({"slug": "demo-a"}))["ok"]
+    assert calls == [
+        ("POST", "/sandboxes/demo-a/provision-sync-defaults", None),
+        ("GET", "/sandboxes/demo-a", None),
+        ("GET", "/sandboxes", None),
+        ("POST", "/sandboxes/demo-a/destroy", None),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_command_creates_thread_and_asks_for_missing_target(tmp_path, monkeypatch):
+async def test_command_without_args_creates_thread_and_prompts(tmp_path, monkeypatch):
     plugin = _load_plugin()
     monkeypatch.setattr(plugin, "_state_path", lambda: tmp_path / "state.json")
     adapter = FakeSlackAdapter()
 
-    await plugin._handle_odoo_event(
-        _event("/odoo-hedge-server 创建一个服务"),
-        _gateway(adapter),
-    )
+    await plugin._handle_odoo_event(_event("/odoo-hedge-server"), _gateway(adapter))
 
     assert len(adapter.client.messages) == 2
     root = adapter.client.messages[0]
     reply = adapter.client.messages[1]
     assert "Odoo Hedge Server 操作线程已开启" in root["text"]
-    assert "初始请求：创建一个服务" in root["text"]
     assert reply["thread_ts"] == root["ts"]
-    assert "请在此 thread 回复要部署的 branch、commit 或 tag" in reply["text"]
+    assert "创建默认值" in reply["text"]
+    assert not adapter.handled_events
     assert root["ts"] in adapter._bot_message_ts
+    assert root["ts"] in adapter._mentioned_threads
     adapter._send_slash_ephemeral.assert_awaited_once()
+
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    marker = next(iter(state["threads"].values()))
+    assert marker["workflow"] == "agent"
+    assert marker["thread_ts"] == root["ts"]
+
+
+@pytest.mark.asyncio
+async def test_command_with_args_injects_initial_thread_event(tmp_path, monkeypatch):
+    plugin = _load_plugin()
+    monkeypatch.setattr(plugin, "_state_path", lambda: tmp_path / "state.json")
+    adapter = FakeSlackAdapter()
+
+    await plugin._handle_odoo_event(
+        _event("/odoo-hedge-server 创建默认值 slug demo-a"),
+        _gateway(adapter),
+    )
+
+    assert len(adapter.client.messages) == 1
+    root = adapter.client.messages[0]
+    assert "初始请求：创建默认值 slug demo-a" in root["text"]
+    assert len(adapter.handled_events) == 1
+    initial = adapter.handled_events[0]
+    assert initial.text == "创建默认值 slug demo-a"
+    assert initial.source.thread_id == root["ts"]
+    assert initial.auto_skill == "odoo-hedge-server"
+    assert "Slack requester: Alice" in initial.channel_prompt
+    assert initial.raw_message["thread_ts"] == root["ts"]
 
 
 @pytest.mark.asyncio
@@ -224,10 +318,7 @@ async def test_command_accepts_slack_response_object(tmp_path, monkeypatch):
     adapter = FakeSlackAdapter()
     adapter.client.response_wrapper = FakeSlackResponse
 
-    await plugin._handle_odoo_event(
-        _event("/odoo-hedge-server 创建一个服务"),
-        _gateway(adapter),
-    )
+    await plugin._handle_odoo_event(_event("/odoo-hedge-server"), _gateway(adapter))
 
     root = adapter.client.messages[0]
     reply = adapter.client.messages[1]
@@ -236,143 +327,30 @@ async def test_command_accepts_slack_response_object(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_command_registers_gateway_thread_session(tmp_path, monkeypatch):
+async def test_active_thread_hook_allows_gateway_and_marks_skill(tmp_path, monkeypatch):
     plugin = _load_plugin()
     monkeypatch.setattr(plugin, "_state_path", lambda: tmp_path / "state.json")
-    api_request = AsyncMock(return_value=_sandbox_record(branch="17.0"))
-    monkeypatch.setattr(plugin, "_api_request", api_request)
     adapter = FakeSlackAdapter()
     gateway = _gateway(adapter)
 
-    await plugin._handle_odoo_event(
-        _event("/odoo-hedge-server 创建一个 17.0 服务"),
-        gateway,
-    )
-
-    gateway.session_store.get_or_create_session.assert_called_once()
-    source = gateway.session_store.get_or_create_session.call_args.args[0]
-    assert source.platform == Platform.SLACK
-    assert source.chat_id == "C123"
-    assert source.thread_id == adapter.client.messages[0]["ts"]
-    api_request.assert_awaited_once_with(
-        "POST",
-        "/sandboxes",
-        {"owner": "Alice", "branch": "17.0"},
-    )
-
-
-@pytest.mark.asyncio
-async def test_thread_followup_collects_commit_and_calls_create(tmp_path, monkeypatch):
-    plugin = _load_plugin()
-    monkeypatch.setattr(plugin, "_state_path", lambda: tmp_path / "state.json")
-    api_request = AsyncMock(return_value=_sandbox_record(commit="abcdef123456"))
-    monkeypatch.setattr(plugin, "_api_request", api_request)
-    adapter = FakeSlackAdapter()
-    gateway = _gateway(adapter)
-
-    await plugin._handle_odoo_event(
-        _event("/odoo-hedge-server 创建一个服务"),
-        gateway,
-    )
+    await plugin._handle_odoo_event(_event("/odoo-hedge-server"), gateway)
     thread_ts = adapter.client.messages[0]["ts"]
 
-    await plugin._handle_odoo_event(
-        _event("abcdef123456", thread_id=thread_ts),
-        gateway,
-    )
+    followup = _event("创建默认值", thread_id=thread_ts)
+    result = plugin._pre_gateway_dispatch(followup, gateway)
 
-    followup = adapter.client.messages[-1]
-    assert followup["thread_ts"] == thread_ts
-    assert "已创建 Odoo sandbox" in followup["text"]
-    assert "commit：`abcdef123456`" in followup["text"]
-    api_request.assert_awaited_once_with(
-        "POST",
-        "/sandboxes",
-        {"owner": "Alice", "commit": "abcdef123456"},
-    )
+    assert result == {"action": "allow"}
+    assert followup.auto_skill == "odoo-hedge-server"
+    assert "Slack requester: Alice" in followup.channel_prompt
 
 
-@pytest.mark.asyncio
-async def test_command_create_with_tag_calls_api(tmp_path, monkeypatch):
+def test_pre_gateway_dispatch_does_not_bypass_auth(tmp_path, monkeypatch):
     plugin = _load_plugin()
     monkeypatch.setattr(plugin, "_state_path", lambda: tmp_path / "state.json")
-    api_request = AsyncMock(return_value=_sandbox_record(tag="2026.6.1"))
-    monkeypatch.setattr(plugin, "_api_request", api_request)
-    adapter = FakeSlackAdapter()
 
-    await plugin._handle_odoo_event(
-        _event("/odoo-hedge-server 创建 2026.6.1"),
-        _gateway(adapter),
+    result = plugin._pre_gateway_dispatch(
+        _event("/odoo-hedge-server 创建默认值"),
+        _gateway(FakeSlackAdapter(), authorized=False),
     )
 
-    reply = adapter.client.messages[-1]
-    assert "已创建 Odoo sandbox" in reply["text"]
-    assert "tag：`2026.6.1`" in reply["text"]
-    api_request.assert_awaited_once_with(
-        "POST",
-        "/sandboxes",
-        {"owner": "Alice", "tag": "2026.6.1"},
-    )
-
-
-@pytest.mark.asyncio
-async def test_command_status_lists_sandboxes(tmp_path, monkeypatch):
-    plugin = _load_plugin()
-    monkeypatch.setattr(plugin, "_state_path", lambda: tmp_path / "state.json")
-    api_request = AsyncMock(return_value=[_sandbox_record(slug="odoo-demo-1")])
-    monkeypatch.setattr(plugin, "_api_request", api_request)
-    adapter = FakeSlackAdapter()
-
-    await plugin._handle_odoo_event(
-        _event("/odoo-hedge-server 列状态"),
-        _gateway(adapter),
-    )
-
-    reply = adapter.client.messages[-1]
-    assert "当前 sandbox" in reply["text"]
-    assert "`odoo-demo-1`" in reply["text"]
-    api_request.assert_awaited_once_with("GET", "/sandboxes")
-
-
-@pytest.mark.asyncio
-async def test_thread_followup_collects_slug_and_calls_destroy(tmp_path, monkeypatch):
-    plugin = _load_plugin()
-    monkeypatch.setattr(plugin, "_state_path", lambda: tmp_path / "state.json")
-    api_request = AsyncMock(return_value=_sandbox_record(status="destroyed"))
-    monkeypatch.setattr(plugin, "_api_request", api_request)
-    adapter = FakeSlackAdapter()
-    gateway = _gateway(adapter)
-
-    await plugin._handle_odoo_event(
-        _event("/odoo-hedge-server 销毁"),
-        gateway,
-    )
-    thread_ts = adapter.client.messages[0]["ts"]
-    assert "请在此 thread 回复 sandbox slug" in adapter.client.messages[-1]["text"]
-
-    await plugin._handle_odoo_event(
-        _event("odoo-demo-1", thread_id=thread_ts),
-        gateway,
-    )
-
-    reply = adapter.client.messages[-1]
-    assert "已调用销毁接口" in reply["text"]
-    api_request.assert_awaited_once_with("POST", "/sandboxes/odoo-demo-1/destroy")
-
-
-@pytest.mark.asyncio
-async def test_upgrade_reports_unsupported_api(tmp_path, monkeypatch):
-    plugin = _load_plugin()
-    monkeypatch.setattr(plugin, "_state_path", lambda: tmp_path / "state.json")
-    api_request = AsyncMock()
-    monkeypatch.setattr(plugin, "_api_request", api_request)
-    adapter = FakeSlackAdapter()
-
-    await plugin._handle_odoo_event(
-        _event("/odoo-hedge-server 升级 odoo-demo-1"),
-        _gateway(adapter),
-    )
-
-    reply = adapter.client.messages[-1]
-    assert "当前 HTTP API 未暴露升级接口" in reply["text"]
-    api_request.assert_not_awaited()
+    assert result == {"action": "allow"}
