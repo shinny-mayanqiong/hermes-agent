@@ -46,9 +46,12 @@ The goal is to build an incremental, maintainable setup where Hermes can support
 
 - `plans/2026-06-04-delivery-workflow-v1.md`
 
-用户提出真实开发需求后，默认创建一个 Kanban root delivery task，由
-`odoo-hedge-orchestrator` 编排 issue、worktree、plan、implementation、review、
-QA、PR、CI、PR comments 和 closeout。
+用户提供已有 GitHub issue 后，默认创建一个 Kanban root delivery task，由
+`odoo-hedge-orchestrator` 从 `Bootstrap Worktree` 开始编排 worktree、plan、
+implementation、review、QA、PR、CI、PR comments 和 closeout。
+
+如果没有 issue，流程先阻塞，等待用户确认是否创建 issue；创建 issue 不属于
+默认 delivery graph。
 
 查看过程：
 

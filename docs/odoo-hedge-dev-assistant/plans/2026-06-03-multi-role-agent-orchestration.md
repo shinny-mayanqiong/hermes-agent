@@ -32,8 +32,8 @@ Hermes 编排层。
 
 待完成：
 
-- 将固定流程升级为 issue -> worktree -> code -> PR -> CI -> PR comments
-  的 delivery workflow。
+- 将固定流程升级为已有 issue -> worktree -> code -> PR -> CI ->
+  PR comments 的 delivery workflow。
 - 接入通知。
 - 为 Architect、Design Reviewer、Spec Reviewer、QA 补充 role skills。
 - 运行一次低风险真实 delivery，从 issue 到 PR。
