@@ -28,7 +28,7 @@ Use these tools:
 - Create: create, deploy, start, new, 创建, 部署, 启动, 新建.
 - List/status: list, status, get, show, 状态, 列状态, 查看, 查询.
 - Destroy: destroy, delete, remove, stop, 销毁, 删除, 关闭, 停止.
-- Upgrade: tell the user this HTTP API currently does not expose an upgrade endpoint.
+- Unsupported: if the user asks to upgrade, tell them this HTTP API currently does not expose an upgrade endpoint.
 
 If the user's intent is unclear, ask one short question in the same Slack thread.
 

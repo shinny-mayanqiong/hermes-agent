@@ -528,7 +528,7 @@ async def _handle_command_start(event: Any, gateway: Any, args: str) -> None:
         [
             "Odoo Hedge Server 操作线程已开启。",
             f"发起人：{_format_user(record['user_name'], record['user_id'])}",
-            "请在此 thread 内继续补充创建、销毁、升级或列状态需求。",
+            "请在此 thread 内继续补充创建、销毁或列状态需求。",
         ]
     )
     if args.strip():
@@ -720,7 +720,7 @@ def register(ctx) -> None:
         COMMAND_NAME,
         _usage,
         description="Start an Odoo Hedge Server Slack workflow",
-        args_hint="<创建|销毁|升级|状态> [版本|commit|tag|默认值|slug]",
+        args_hint="<创建|销毁|状态> [版本|commit|tag|默认值|slug]",
         platforms=("slack",),
     )
     for name, schema, handler, emoji in _TOOLS:

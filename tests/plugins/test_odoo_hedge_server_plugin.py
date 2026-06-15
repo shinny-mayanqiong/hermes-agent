@@ -187,6 +187,7 @@ def test_register_exposes_odoo_toolset_and_slack_hook():
     plugin.register(ctx)
 
     assert ctx.commands[0][0][0] == "odoo-hedge-server"
+    assert "升级" not in ctx.commands[0][1]["args_hint"]
     assert {call[1]["toolset"] for call in ctx.tools} == {"odoo_hedge_server"}
     assert {call[1]["name"] for call in ctx.tools} == {
         "odoo_sandbox_create",
@@ -275,6 +276,8 @@ async def test_command_without_args_creates_thread_and_prompts(tmp_path, monkeyp
     root = adapter.client.messages[0]
     reply = adapter.client.messages[1]
     assert "Odoo Hedge Server 操作线程已开启" in root["text"]
+    assert "创建、销毁或列状态" in root["text"]
+    assert "升级" not in root["text"]
     assert reply["thread_ts"] == root["ts"]
     assert "创建默认值" in reply["text"]
     assert not adapter.handled_events
