@@ -58,6 +58,7 @@ Before calling `odoo_sandbox_create`, if the target is missing and the user did 
 3. If create succeeds, send a visible interim Slack message saying:
    `Odoo sandbox 已创建，正在写入信易账户。`
    Include the returned `url` as 访问域名 and `db_name` as 数据库名字 when present.
+   This interim message must stay in the current Slack thread.
 4. Then call `odoo_sandbox_provision_sync_defaults` with the returned `slug`.
 5. Final response must include:
    - 访问域名
@@ -79,4 +80,4 @@ For destroy:
 
 ## Replies
 
-Keep Slack replies concise and operational. For HTTP failures, surface the backend `code`, `message`, and useful `details` fields. If the error details mention Docker image build failure, explain that the backend failed while building or ensuring the sandbox image.
+Keep Slack replies concise, operational, and in the current thread. For HTTP failures, surface the backend `code`, `message`, and useful `details` fields. If the error details mention Docker image build failure, explain that the backend failed while building or ensuring the sandbox image.

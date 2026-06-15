@@ -4073,12 +4073,15 @@ async def _standalone_send(
             ) as resp:
                 data = await resp.json()
                 if data.get("ok"):
-                    return {
+                    result = {
                         "success": True,
                         "platform": "slack",
                         "chat_id": chat_id,
                         "message_id": data.get("ts"),
                     }
+                    if thread_id:
+                        result["thread_id"] = str(thread_id)
+                    return result
                 return {"error": f"Slack API error: {data.get('error', 'unknown')}"}
     except Exception as e:
         return {"error": f"Slack send failed: {e}"}

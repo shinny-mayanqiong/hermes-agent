@@ -129,9 +129,9 @@ def _make_recording_slack_sender():
 
     Paired with ``_patch_slack_standalone_sender``, which wraps it so the
     production ``(pconfig, chat_id, raw_text, thread_id=...)`` call is
-    translated into the pre-migration ``(token, chat_id, formatted_text,
-    thread_ts=...)`` shape — applying ``SlackAdapter.format_message`` exactly
-    as the real plugin ``_standalone_send`` does. Tests can then assert on
+    translated into ``(token, chat_id, formatted_text, thread_id=...)`` while
+    applying ``SlackAdapter.format_message`` exactly as the real plugin
+    ``_standalone_send`` does. Tests can then assert on
     ``send.await_args.args[2]`` (the formatted mrkdwn) as before.
     """
     return AsyncMock(return_value={"success": True, "platform": "slack", "message_id": "1"})
@@ -162,7 +162,7 @@ class _patch_slack_standalone_sender:
             except Exception:
                 pass
         token = getattr(pconfig, "token", None)
-        return await self._mock(token, chat_id, formatted, thread_ts=thread_id)
+        return await self._mock(token, chat_id, formatted, thread_id=thread_id)
 
     def __enter__(self):
         self._entry = _slack_entry()
@@ -698,7 +698,7 @@ class TestSendToPlatformChunking:
             "***",
             "C123",
             "*hello* from <https://example.com|Hermes>",
-            thread_ts=None,
+            thread_id=None,
         )
 
     def test_slack_bold_italic_formatted_before_send(self, monkeypatch):
@@ -720,6 +720,7 @@ class TestSendToPlatformChunking:
         assert result["success"] is True
         sent_text = send.await_args.args[2]
         assert "*_important_*" in sent_text
+        assert send.await_args.kwargs["thread_id"] is None
 
     def test_slack_blockquote_formatted_before_send(self, monkeypatch):
         """Blockquote '>' markers must survive formatting (not escaped to '&gt;')."""
@@ -742,6 +743,7 @@ class TestSendToPlatformChunking:
         assert sent_text.startswith("> important quote")
         assert "&amp;" in sent_text  # & is escaped
         assert "&gt;" not in sent_text.split("\n")[0]  # > in blockquote is NOT escaped
+        assert send.await_args.kwargs["thread_id"] is None
 
     def test_slack_pre_escaped_entities_not_double_escaped(self, monkeypatch):
         """Pre-escaped HTML entities survive tool-layer formatting without double-escaping."""
@@ -763,6 +765,7 @@ class TestSendToPlatformChunking:
         assert "&amp;amp;" not in sent_text
         assert "&amp;lt;" not in sent_text
         assert "AT&amp;T" in sent_text
+        assert send.await_args.kwargs["thread_id"] is None
 
     def test_slack_url_with_parens_formatted_before_send(self, monkeypatch):
         """Wikipedia-style URL with parens survives tool-layer formatting."""
@@ -782,6 +785,7 @@ class TestSendToPlatformChunking:
         assert result["success"] is True
         sent_text = send.await_args.args[2]
         assert "<https://en.wikipedia.org/wiki/Foo_(bar)|Foo>" in sent_text
+        assert send.await_args.kwargs["thread_id"] is None
 
     def test_telegram_media_attaches_to_last_chunk(self):
 

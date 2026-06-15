@@ -158,7 +158,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'ntfy:alerts-channel' (explicit ntfy topic), 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat)"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics, Slack threads, and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'slack:C0123456789:1781507965.625969', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'ntfy:alerts-channel' (explicit ntfy topic), 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat)"
             },
             "message": {
                 "type": "string",
@@ -404,6 +404,8 @@ def _handle_send(args):
                 f"or set a home channel via: hermes config set {home_env} <channel_id>"
             })
 
+    thread_id = _inherit_current_thread_id(platform_name, chat_id, thread_id)
+
     duplicate_skip = _maybe_skip_cron_duplicate_send(platform_name, chat_id, thread_id)
     if duplicate_skip:
         return json.dumps(duplicate_skip)
@@ -551,6 +553,30 @@ def _parse_target_ref(platform_name: str, target_ref: str):
     if platform_name == "xmpp" and "@" in target_ref:
         return target_ref, None, True
     return None, None, False
+
+
+def _inherit_current_thread_id(platform_name: str, chat_id: str, thread_id: str | None):
+    """Keep explicit sends inside the current gateway thread when safe.
+
+    Models often know the current channel but omit the current thread id.
+    If the requested target is the same platform + chat as the active
+    gateway session, preserve the session thread so an interim tool message
+    doesn't escape into the parent channel.
+    """
+    if thread_id:
+        return thread_id
+    if not chat_id:
+        return thread_id
+    try:
+        from gateway.session_context import get_session_env
+        current_platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower()
+        current_chat = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
+        current_thread = get_session_env("HERMES_SESSION_THREAD_ID", "").strip()
+    except Exception:
+        return thread_id
+    if current_platform == platform_name and current_chat == str(chat_id) and current_thread:
+        return current_thread
+    return thread_id
 
 
 def _describe_media_for_mirror(media_files):
