@@ -129,8 +129,21 @@ def test_default_config_enables_plugin():
     assert server["timeout"] == 1200
 
 
-def test_skill_keeps_core_tools_and_documents_operation_map():
+def test_skill_prefers_operation_map_and_keeps_legacy_fallback():
     skill = SKILL_PATH.read_text(encoding="utf-8")
+
+    assert "Runtime Operation Map" in skill
+    assert "hedge-sandbox://operations/map" in skill
+    assert "hedge-sandbox://guide/operation-map-format" in skill
+    assert "`mcp_odoo_hedge_server_list_prompts`" in skill
+    assert "`mcp_odoo_hedge_server_get_prompt`" in skill
+    assert "`mcp_odoo_hedge_server_list_resources`" in skill
+    assert "`mcp_odoo_hedge_server_read_resource`" in skill
+    assert "mcp_odoo_hedge_server_" in skill
+    assert "Do not add new server" in skill
+    assert "mutating_shell" in skill
+    assert "destructive_control" in skill
+    assert "Legacy Fallback" in skill
 
     for tool_name in (
         "mcp_odoo_hedge_server_sandbox_healthz",
@@ -143,12 +156,6 @@ def test_skill_keeps_core_tools_and_documents_operation_map():
         "mcp_odoo_hedge_server_provision_sync_defaults",
     ):
         assert f"`{tool_name}`" in skill
-
-    assert "Forward-Compatible Tool Map" in skill
-    assert "`mcp_odoo_hedge_server_list_prompts`" in skill
-    assert "`mcp_odoo_hedge_server_get_prompt`" in skill
-    assert "`mcp_odoo_hedge_server_list_resources`" in skill
-    assert "`mcp_odoo_hedge_server_read_resource`" in skill
 
 
 def test_register_exposes_slack_command_and_hook_without_tools():
