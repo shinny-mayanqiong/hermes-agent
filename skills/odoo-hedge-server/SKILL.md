@@ -20,6 +20,7 @@ Use these tools:
 - `mcp_odoo_hedge_server_sandbox_healthz`
 - `mcp_odoo_hedge_server_ensure_sandbox_version`
 - `mcp_odoo_hedge_server_create_sandbox`
+- `mcp_odoo_hedge_server_upgrade_sandbox`
 - `mcp_odoo_hedge_server_list_sandboxes`
 - `mcp_odoo_hedge_server_get_sandbox`
 - `mcp_odoo_hedge_server_destroy_sandbox`
@@ -28,9 +29,9 @@ Use these tools:
 ## Intent Routing
 
 - Create: create, deploy, start, new, 创建, 部署, 启动, 新建.
+- Upgrade: upgrade, update, switch version, replace version, 升级, 更新, 切换版本.
 - List/status: list, status, get, show, 状态, 列状态, 查看, 查询.
 - Destroy: destroy, delete, remove, stop, 销毁, 删除, 关闭, 停止.
-- Unsupported: if the user asks to upgrade, tell them the sandbox MCP tools currently do not expose an upgrade endpoint.
 
 If the user's intent is unclear, ask one short question in the same Slack thread.
 
@@ -71,6 +72,20 @@ Before calling `mcp_odoo_hedge_server_create_sandbox` with a `branch`, `commit`,
    - whether 信易账户写入 succeeded
 
 If create fails, do not call provisioning. If create succeeds but provisioning fails, say the sandbox was created and 信易账户写入 failed. Still include 访问域名 and 数据库名字 from the create result.
+
+## Upgrade Workflow
+
+For upgrade, collect:
+- `slug`: require an explicit sandbox slug.
+- deployment target: require exactly one of `branch`, `commit`, or `tag`.
+
+Use the same target rules as create. Treat forms like `升级 demo-a 到 2026.6.2`, `upgrade demo-a to feature/x`, or `切换 demo-a commit abcdef123` as `slug=demo-a` plus the target. If slug or target is missing or ambiguous, ask for the missing piece. Do not treat default, 默认, 默认值, or 缺省 as a sufficient upgrade target.
+
+Before calling `mcp_odoo_hedge_server_upgrade_sandbox`, call `mcp_odoo_hedge_server_ensure_sandbox_version` with exactly the same target fields. If that check fails, do not upgrade the sandbox.
+
+Call `mcp_odoo_hedge_server_upgrade_sandbox` with `slug` and exactly the target fields the user provided. The upgrade keeps the sandbox database, filestore, slug, and routing resources. Do not call `mcp_odoo_hedge_server_provision_sync_defaults` after upgrade unless the user explicitly asks for 信易账户写入.
+
+Final response must include the slug, target, upgrade result, and returned `url` or `db_name` when present. If upgrade fails, surface the backend `code`, `message`, and useful `details`.
 
 ## Status And Destroy
 

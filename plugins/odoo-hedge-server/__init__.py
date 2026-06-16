@@ -305,9 +305,10 @@ async def _dispatch_thread_event(event: Any, gateway: Any, adapter: Any, thread_
 def _format_thread_prompt(record: dict[str, Any]) -> str:
     return "\n".join(
         [
-            "请直接在此 thread 描述要创建、销毁或查询的 Odoo 服务。",
+            "请直接在此 thread 描述要创建、升级、销毁或查询的 Odoo 服务。",
             f"当前用户：{_format_user(str(record.get('user_name') or ''), str(record.get('user_id') or ''))}",
             "创建示例：`创建默认值`、`创建 2026.6.1`、`创建 abcdef123 slug demo-a`。",
+            "升级示例：`升级 demo-a 到 2026.6.2`、`升级 demo-a commit abcdef123`。",
         ]
     )
 
@@ -327,7 +328,7 @@ async def _handle_command_start(event: Any, gateway: Any, args: str) -> None:
         [
             "Odoo Hedge Server 操作线程已开启。",
             f"发起人：{_format_user(record['user_name'], record['user_id'])}",
-            "请在此 thread 内继续补充创建、销毁或列状态需求。",
+            "请在此 thread 内继续补充创建、升级、销毁或列状态需求。",
         ]
     )
     if args.strip():
@@ -439,8 +440,9 @@ def _pre_gateway_dispatch(event: Any, gateway: Any, **_: Any) -> dict[str, str] 
 def _usage(raw_args: str) -> str:
     del raw_args
     return (
-        "Usage: `/odoo-hedge-server 创建 默认值` 或 `/odoo-hedge-server 创建 2026.6.1`\n"
-        "Slack 中会创建一个专用 thread，后续直接在该 thread 回复版本、commit、tag、默认值或 slug。"
+        "Usage: `/odoo-hedge-server 创建 默认值`、`/odoo-hedge-server 创建 2026.6.1` "
+        "或 `/odoo-hedge-server 升级 demo-a 到 2026.6.2`\n"
+        "Slack 中会创建一个专用 thread，后续直接在该 thread 回复版本、commit、tag、默认值、slug 或升级目标。"
     )
 
 
@@ -449,7 +451,7 @@ def register(ctx) -> None:
         COMMAND_NAME,
         _usage,
         description="Start an Odoo Hedge Server Slack workflow",
-        args_hint="<创建|销毁|状态> [版本|commit|tag|默认值|slug]",
+        args_hint="<创建|升级|销毁|状态> [slug] [版本|commit|tag|默认值]",
         platforms=("slack",),
     )
     ctx.register_hook("pre_gateway_dispatch", _pre_gateway_dispatch)
