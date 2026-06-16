@@ -179,17 +179,14 @@ def _remember_slack_thread(adapter: Any, thread_ts: str, message_ts: str = "") -
         mentioned.add(thread_ts)
 
 
-async def _replace_slash_ack(adapter: Any, chat_id: str, content: str) -> None:
+def _discard_slash_context(adapter: Any, chat_id: str) -> None:
     pop_ctx = getattr(adapter, "_pop_slash_context", None)
-    send_ephemeral = getattr(adapter, "_send_slash_ephemeral", None)
-    if not pop_ctx or not send_ephemeral:
+    if not pop_ctx:
         return
     try:
-        ctx = pop_ctx(chat_id)
-        if ctx:
-            await send_ephemeral(ctx, content)
+        pop_ctx(chat_id)
     except Exception as exc:
-        logger.debug("[odoo-hedge-server] Failed to replace Slack slash ack: %s", exc)
+        logger.debug("[odoo-hedge-server] Failed to discard Slack slash context: %s", exc)
 
 
 def _base_record(event: Any, user_name: str, raw_text: str) -> dict[str, Any]:
@@ -349,11 +346,7 @@ async def _handle_command_start(event: Any, gateway: Any, args: str) -> None:
         await _save_state(state)
 
     _remember_slack_thread(adapter, thread_ts)
-    await _replace_slash_ack(
-        adapter,
-        chat_id,
-        "已创建 Odoo Hedge Server thread，请在新 thread 中继续。",
-    )
+    _discard_slash_context(adapter, chat_id)
 
     if args.strip():
         dispatched = await _dispatch_thread_event(event, gateway, adapter, thread_ts, record)

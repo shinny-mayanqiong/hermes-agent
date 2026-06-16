@@ -70,6 +70,7 @@ class FakeSlackAdapter:
         self._bot_message_ts = set()
         self._mentioned_threads = set()
         self._send_slash_ephemeral = AsyncMock()
+        self.pop_slash_context_count = 0
 
     def _get_client(self, chat_id):
         del chat_id
@@ -81,6 +82,7 @@ class FakeSlackAdapter:
 
     def _pop_slash_context(self, chat_id):
         del chat_id
+        self.pop_slash_context_count += 1
         return {"response_url": "https://slack.example/response"}
 
     def format_message(self, content):
@@ -195,7 +197,8 @@ async def test_command_without_args_creates_thread_and_prompts(tmp_path, monkeyp
     assert not adapter.handled_events
     assert root["ts"] in adapter._bot_message_ts
     assert root["ts"] in adapter._mentioned_threads
-    adapter._send_slash_ephemeral.assert_awaited_once()
+    assert adapter.pop_slash_context_count == 1
+    adapter._send_slash_ephemeral.assert_not_awaited()
 
     state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     marker = next(iter(state["threads"].values()))
@@ -224,6 +227,7 @@ async def test_command_with_args_injects_initial_thread_event(tmp_path, monkeypa
     assert initial.auto_skill == "odoo-hedge-server"
     assert "Slack requester: Alice" in initial.channel_prompt
     assert initial.raw_message["thread_ts"] == root["ts"]
+    assert adapter.pop_slash_context_count == 1
 
 
 @pytest.mark.asyncio
