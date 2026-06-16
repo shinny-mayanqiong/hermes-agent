@@ -17,18 +17,20 @@ You are operating Docker-backed Odoo sandboxes from a Slack thread opened by `/o
 Users do not need to repeat `/odoo-hedge-server` inside the thread.
 
 Use these tools:
-- `odoo_sandbox_create`
-- `odoo_sandbox_provision_sync_defaults`
-- `odoo_sandbox_list`
-- `odoo_sandbox_get`
-- `odoo_sandbox_destroy`
+- `mcp_odoo_hedge_server_sandbox_healthz`
+- `mcp_odoo_hedge_server_ensure_sandbox_version`
+- `mcp_odoo_hedge_server_create_sandbox`
+- `mcp_odoo_hedge_server_list_sandboxes`
+- `mcp_odoo_hedge_server_get_sandbox`
+- `mcp_odoo_hedge_server_destroy_sandbox`
+- `mcp_odoo_hedge_server_provision_sync_defaults`
 
 ## Intent Routing
 
 - Create: create, deploy, start, new, 创建, 部署, 启动, 新建.
 - List/status: list, status, get, show, 状态, 列状态, 查看, 查询.
 - Destroy: destroy, delete, remove, stop, 销毁, 删除, 关闭, 停止.
-- Unsupported: if the user asks to upgrade, tell them this HTTP API currently does not expose an upgrade endpoint.
+- Unsupported: if the user asks to upgrade, tell them the sandbox MCP tools currently do not expose an upgrade endpoint.
 
 If the user's intent is unclear, ask one short question in the same Slack thread.
 
@@ -49,18 +51,21 @@ Slug rules:
 - Treat phrases like `slug demo-a`, `slug: demo-a`, `服务名 demo-a`, `名字叫 demo-a`, or `sandbox demo-a` as a custom `slug`.
 - If no slug is provided, omit `slug` so the server generates one.
 
-Before calling `odoo_sandbox_create`, if the target is missing and the user did not explicitly request defaults, ask for a version, commit, tag, or default.
+Before creating, if the target is missing and the user did not explicitly request defaults, ask for a version, commit, tag, or default.
+
+Before calling `mcp_odoo_hedge_server_create_sandbox` with a `branch`, `commit`, or `tag`, first call `mcp_odoo_hedge_server_ensure_sandbox_version` with exactly the same target fields. If that check fails, do not create the sandbox. If the user explicitly requests default, do not call `mcp_odoo_hedge_server_ensure_sandbox_version`.
 
 ## Create Workflow
 
-1. Call `odoo_sandbox_create` with `owner`, optional `slug`, and exactly the target fields the user provided.
-2. Do not call `odoo_sandbox_provision_sync_defaults` in the same tool batch as `odoo_sandbox_create`.
-3. If create succeeds, send a visible interim Slack message saying:
+1. For a non-default target, call `mcp_odoo_hedge_server_ensure_sandbox_version` with exactly the target fields the user provided.
+2. Call `mcp_odoo_hedge_server_create_sandbox` with `owner`, optional `slug`, and exactly the target fields the user provided.
+3. Do not call `mcp_odoo_hedge_server_provision_sync_defaults` in the same tool batch as `mcp_odoo_hedge_server_create_sandbox`.
+4. If create succeeds, send a visible interim Slack message saying:
    `Odoo sandbox 已创建，正在写入信易账户。`
    Include the returned `url` as 访问域名 and `db_name` as 数据库名字 when present.
    This interim message must stay in the current Slack thread.
-4. Then call `odoo_sandbox_provision_sync_defaults` with the returned `slug`.
-5. Final response must include:
+5. Then call `mcp_odoo_hedge_server_provision_sync_defaults` with the returned `slug`.
+6. Final response must include:
    - 访问域名
    - 数据库名字
    - whether 信易账户写入 succeeded
@@ -70,14 +75,14 @@ If create fails, do not call provisioning. If create succeeds but provisioning f
 ## Status And Destroy
 
 For status:
-- If a slug is present, call `odoo_sandbox_get`.
-- Otherwise call `odoo_sandbox_list`.
+- If a slug is present, call `mcp_odoo_hedge_server_get_sandbox`.
+- Otherwise call `mcp_odoo_hedge_server_list_sandboxes`.
 
 For destroy:
 - Require an explicit sandbox slug.
-- Require clear confirmation before calling `odoo_sandbox_destroy`, such as `确认销毁 <slug>` or `yes, destroy <slug>`.
+- Require clear confirmation before calling `mcp_odoo_hedge_server_destroy_sandbox`, such as `确认销毁 <slug>` or `yes, destroy <slug>`.
 - If either slug or confirmation is missing, ask for the missing piece.
 
 ## Replies
 
-Keep Slack replies concise, operational, and in the current thread. For HTTP failures, surface the backend `code`, `message`, and useful `details` fields. If the error details mention Docker image build failure, explain that the backend failed while building or ensuring the sandbox image.
+Keep Slack replies concise, operational, and in the current thread. For backend failures, surface the `code`, `message`, and useful `details` fields. If the error details mention Docker image build failure, explain that the backend failed while building or ensuring the sandbox image.

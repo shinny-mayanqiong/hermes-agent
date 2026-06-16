@@ -1,13 +1,7 @@
 name: odoo-hedge-server
-version: "0.1.0"
-description: "Start Slack Odoo sandbox agent threads and tools."
+version: "0.2.0"
+description: "Start Slack Odoo sandbox agent threads."
 author: "Hermes Agent"
 kind: standalone
 hooks:
   - pre_gateway_dispatch
-provides_tools:
-  - odoo_sandbox_create
-  - odoo_sandbox_provision_sync_defaults
-  - odoo_sandbox_list
-  - odoo_sandbox_get
-  - odoo_sandbox_destroy

@@ -57,7 +57,7 @@ def _make_args(**kwargs):
     return argparse.Namespace(**defaults)
 
 
-def _seed_config(tmp_path: Path, mcp_servers: dict):
+def _seed_config(tmp_path: Path, mcp_servers):
     """Write a config.yaml with the given mcp_servers."""
     import yaml
 
@@ -81,6 +81,7 @@ class FakeTool:
 
 class TestMcpList:
     def test_list_empty_config(self, tmp_path, capsys):
+        _seed_config(tmp_path, None)
         from hermes_cli.mcp_config import cmd_mcp_list
 
         cmd_mcp_list()
@@ -664,7 +665,7 @@ class TestMcpRemoveEvictsManager:
 
         mgr = get_manager()
         mgr.get_or_build_provider(
-            "oauth-srv", "https://example.com/mcp", None,
+            "oauth-srv", "https://example.com/mcp", {"redirect_port": 37654},
         )
         assert "oauth-srv" in mgr._entries
 

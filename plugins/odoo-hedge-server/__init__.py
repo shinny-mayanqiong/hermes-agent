@@ -10,9 +10,6 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote
-from urllib.request import Request, urlopen
 
 from hermes_constants import get_hermes_home
 from utils import atomic_replace
@@ -23,9 +20,6 @@ COMMAND_NAME = "odoo-hedge-server"
 COMMAND_PREFIX = f"/{COMMAND_NAME}"
 ALT_COMMAND_PREFIX = f"!{COMMAND_NAME}"
 SKILL_NAME = "odoo-hedge-server"
-TOOLSET_NAME = "odoo_hedge_server"
-DEFAULT_API_BASE_URL = "http://127.0.0.1:18080"
-DEFAULT_API_TIMEOUT_SECONDS = 1200.0
 
 _STATE_LOCK = asyncio.Lock()
 
@@ -61,180 +55,6 @@ async def _save_state(state: dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     atomic_replace(tmp, path)
-
-
-class SandboxApiError(Exception):
-    def __init__(
-        self,
-        message: str,
-        *,
-        status: int | None = None,
-        code: str = "",
-        details: Any = None,
-    ) -> None:
-        super().__init__(message)
-        self.message = message
-        self.status = status
-        self.code = code
-        self.details = details
-
-
-def _api_settings() -> tuple[str, float]:
-    base_url = DEFAULT_API_BASE_URL
-    timeout = DEFAULT_API_TIMEOUT_SECONDS
-    try:
-        from hermes_cli.config import cfg_get, load_config
-
-        cfg = load_config()
-        configured_base = cfg_get(cfg, "odoo_hedge_server", "api_base_url", default=None)
-        if configured_base is None:
-            configured_base = cfg_get(cfg, "odoo-hedge-server", "api_base_url", default=None)
-        if isinstance(configured_base, str) and configured_base.strip():
-            base_url = configured_base.strip()
-
-        configured_timeout = cfg_get(cfg, "odoo_hedge_server", "timeout_seconds", default=None)
-        if configured_timeout is None:
-            configured_timeout = cfg_get(cfg, "odoo-hedge-server", "timeout_seconds", default=None)
-        if configured_timeout is not None:
-            timeout = float(configured_timeout)
-    except Exception as exc:
-        logger.debug("[odoo-hedge-server] Failed to load API config: %s", exc)
-    if timeout <= 0:
-        timeout = DEFAULT_API_TIMEOUT_SECONDS
-    return base_url.rstrip("/"), timeout
-
-
-def _decode_json(raw: bytes) -> Any:
-    if not raw:
-        return None
-    try:
-        return json.loads(raw.decode("utf-8"))
-    except Exception:
-        return raw.decode("utf-8", errors="replace")
-
-
-def _api_error_from_payload(status: int | None, payload: Any, fallback: str) -> SandboxApiError:
-    code = ""
-    details = None
-    message = fallback
-    if isinstance(payload, dict):
-        error = payload.get("error")
-        if isinstance(error, dict):
-            code = str(error.get("code") or "")
-            details = error.get("details")
-            message = str(error.get("message") or fallback)
-        elif payload.get("detail"):
-            message = str(payload.get("detail"))
-    elif isinstance(payload, str) and payload.strip():
-        message = payload.strip()
-    return SandboxApiError(message, status=status, code=code, details=details)
-
-
-def _api_request_sync(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
-    base_url, timeout = _api_settings()
-    data: bytes | None = None
-    headers = {"Accept": "application/json"}
-    if body is not None:
-        data = json.dumps(body).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-
-    request = Request(
-        f"{base_url}/{path.lstrip('/')}",
-        data=data,
-        headers=headers,
-        method=method.upper(),
-    )
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            return _decode_json(response.read())
-    except HTTPError as exc:
-        payload = _decode_json(exc.read())
-        raise _api_error_from_payload(exc.code, payload, str(exc.reason or "HTTP error")) from exc
-    except URLError as exc:
-        reason = getattr(exc, "reason", exc)
-        raise SandboxApiError(f"无法连接 HTTP 服务：{reason}") from exc
-    except TimeoutError as exc:
-        raise SandboxApiError("HTTP 服务调用超时") from exc
-    except OSError as exc:
-        raise SandboxApiError(f"HTTP 服务调用失败：{exc}") from exc
-
-
-def _tool_payload(ok: bool, **fields: Any) -> str:
-    payload = {"ok": ok}
-    payload.update(fields)
-    return json.dumps(payload, ensure_ascii=False)
-
-
-def _tool_error(exc: SandboxApiError) -> str:
-    return _tool_payload(
-        False,
-        status=exc.status,
-        code=exc.code,
-        message=exc.message,
-        error={
-            "status": exc.status,
-            "code": exc.code,
-            "message": exc.message,
-            "details": exc.details,
-        },
-        details=exc.details,
-    )
-
-
-def _clean_arg(args: dict[str, Any], key: str) -> str:
-    value = args.get(key)
-    return str(value).strip() if value is not None else ""
-
-
-def _odoo_sandbox_create_tool(args: dict[str, Any], **_: Any) -> str:
-    body = _create_body(args)
-    try:
-        data = _api_request_sync("POST", "/sandboxes", body)
-    except SandboxApiError as exc:
-        return _tool_error(exc)
-    return _tool_payload(True, status="created", data=data)
-
-
-def _odoo_sandbox_provision_sync_defaults_tool(args: dict[str, Any], **_: Any) -> str:
-    slug = _clean_arg(args, "slug")
-    if not slug:
-        return _tool_payload(False, message="Missing required slug", error={"code": "missing_slug"})
-    try:
-        data = _api_request_sync("POST", f"/sandboxes/{quote(slug, safe='')}/provision-sync-defaults")
-    except SandboxApiError as exc:
-        return _tool_error(exc)
-    return _tool_payload(True, status="provisioned", data=data)
-
-
-def _odoo_sandbox_list_tool(args: dict[str, Any], **_: Any) -> str:
-    del args
-    try:
-        data = _api_request_sync("GET", "/sandboxes")
-    except SandboxApiError as exc:
-        return _tool_error(exc)
-    return _tool_payload(True, status="listed", data=data)
-
-
-def _odoo_sandbox_get_tool(args: dict[str, Any], **_: Any) -> str:
-    slug = _clean_arg(args, "slug")
-    if not slug:
-        return _tool_payload(False, message="Missing required slug", error={"code": "missing_slug"})
-    try:
-        data = _api_request_sync("GET", f"/sandboxes/{quote(slug, safe='')}")
-    except SandboxApiError as exc:
-        return _tool_error(exc)
-    return _tool_payload(True, status="found", data=data)
-
-
-def _odoo_sandbox_destroy_tool(args: dict[str, Any], **_: Any) -> str:
-    slug = _clean_arg(args, "slug")
-    if not slug:
-        return _tool_payload(False, message="Missing required slug", error={"code": "missing_slug"})
-    try:
-        data = _api_request_sync("POST", f"/sandboxes/{quote(slug, safe='')}/destroy")
-    except SandboxApiError as exc:
-        return _tool_error(exc)
-    return _tool_payload(True, status="destroyed", data=data)
 
 
 def _platform_value(source: Any) -> str:
@@ -283,27 +103,6 @@ def _format_user(user_name: str, user_id: str) -> str:
     if user_name and user_id and user_name != user_id:
         return f"{user_name} (`{user_id}`)"
     return user_id or user_name or "unknown"
-
-
-def _owner_for_api(record: dict[str, Any]) -> str:
-    return str(record.get("owner") or record.get("user_name") or record.get("user_id") or "").strip()
-
-
-def _create_body(record: dict[str, Any]) -> dict[str, Any]:
-    body: dict[str, Any] = {}
-    owner = _owner_for_api(record)
-    if owner:
-        body["owner"] = owner
-    slug = str(record.get("slug") or "").strip()
-    if slug:
-        body["slug"] = slug
-    if str(record.get("use_default") or "").strip():
-        return body
-    for key in ("branch", "commit", "tag"):
-        value = str(record.get(key) or "").strip()
-        if value:
-            body[key] = value
-    return body
 
 
 async def _resolve_user_name(adapter: Any, event: Any) -> str:
@@ -645,76 +444,6 @@ def _usage(raw_args: str) -> str:
     )
 
 
-_CREATE_SCHEMA = {
-    "name": "odoo_sandbox_create",
-    "description": "Create an Odoo sandbox through the Hedge Sandbox Control API.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "owner": {"type": "string", "description": "Slack requester name or user id."},
-            "slug": {"type": "string", "description": "Optional custom sandbox slug."},
-            "branch": {"type": "string", "description": "Source branch or version branch."},
-            "commit": {"type": "string", "description": "Source commit SHA."},
-            "tag": {"type": "string", "description": "Official release tag in year.month.release_count form."},
-        },
-        "additionalProperties": False,
-    },
-}
-
-_PROVISION_SCHEMA = {
-    "name": "odoo_sandbox_provision_sync_defaults",
-    "description": "Provision default Xinyi account settings for an Odoo sandbox.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "slug": {"type": "string", "description": "Sandbox slug returned by create or supplied by the user."},
-        },
-        "required": ["slug"],
-        "additionalProperties": False,
-    },
-}
-
-_LIST_SCHEMA = {
-    "name": "odoo_sandbox_list",
-    "description": "List Odoo sandboxes.",
-    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-}
-
-_GET_SCHEMA = {
-    "name": "odoo_sandbox_get",
-    "description": "Get one Odoo sandbox by slug.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "slug": {"type": "string", "description": "Sandbox slug."},
-        },
-        "required": ["slug"],
-        "additionalProperties": False,
-    },
-}
-
-_DESTROY_SCHEMA = {
-    "name": "odoo_sandbox_destroy",
-    "description": "Destroy one Odoo sandbox by slug.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "slug": {"type": "string", "description": "Sandbox slug to destroy."},
-        },
-        "required": ["slug"],
-        "additionalProperties": False,
-    },
-}
-
-_TOOLS = (
-    ("odoo_sandbox_create", _CREATE_SCHEMA, _odoo_sandbox_create_tool, "🧱"),
-    ("odoo_sandbox_provision_sync_defaults", _PROVISION_SCHEMA, _odoo_sandbox_provision_sync_defaults_tool, "🔐"),
-    ("odoo_sandbox_list", _LIST_SCHEMA, _odoo_sandbox_list_tool, "📋"),
-    ("odoo_sandbox_get", _GET_SCHEMA, _odoo_sandbox_get_tool, "🔎"),
-    ("odoo_sandbox_destroy", _DESTROY_SCHEMA, _odoo_sandbox_destroy_tool, "🗑️"),
-)
-
-
 def register(ctx) -> None:
     ctx.register_command(
         COMMAND_NAME,
@@ -723,12 +452,4 @@ def register(ctx) -> None:
         args_hint="<创建|销毁|状态> [版本|commit|tag|默认值|slug]",
         platforms=("slack",),
     )
-    for name, schema, handler, emoji in _TOOLS:
-        ctx.register_tool(
-            name=name,
-            toolset=TOOLSET_NAME,
-            schema=schema,
-            handler=handler,
-            emoji=emoji,
-        )
     ctx.register_hook("pre_gateway_dispatch", _pre_gateway_dispatch)

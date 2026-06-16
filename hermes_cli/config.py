@@ -892,9 +892,15 @@ DEFAULT_CONFIG = {
         "enabled": ["odoo-hedge-server"],
         "disabled": [],
     },
-    "odoo_hedge_server": {
-        "api_base_url": "http://127.0.0.1:18080",
-        "timeout_seconds": 1200,
+    "mcp_servers": {
+        # Sandbox lifecycle tools are served by the Hedge Sandbox Control MCP
+        # server. The odoo-hedge-server plugin only opens Slack workflow
+        # threads; actual sandbox operations come from this MCP server.
+        "odoo-hedge-server": {
+            "url": "http://192.168.139.7:18079/mcp",
+            "timeout": 1200,
+            "connect_timeout": 60,
+        },
     },
     "toolsets": ["hermes-cli"],
     # Global active chat session cap across CLI, TUI/dashboard, and messaging.

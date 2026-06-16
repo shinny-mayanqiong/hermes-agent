@@ -112,60 +112,16 @@ def _gateway(adapter, *, authorized=True):
     )
 
 
-def _sandbox_record(**overrides):
-    record = {
-        "id": "sbx-1",
-        "slug": "odoo-demo-1",
-        "owner": "Alice",
-        "status": "running",
-        "db_name": "odoo_demo_1",
-        "url": "http://127.0.0.1:18081",
-        "host_port": 18081,
-        "container_name": "odoo-demo-1",
-        "filestore_path": "/tmp/filestore",
-        "config_path": "/tmp/odoo.conf",
-        "branch": None,
-        "commit": None,
-        "tag": None,
-        "image_tag": "hedge-test",
-        "image": "odoo:test",
-        "created_at": "2026-06-12T00:00:00Z",
-        "updated_at": "2026-06-12T00:00:00Z",
-        "last_error": None,
-        "sync_defaults_status": "pending",
-        "sync_defaults_error": None,
-        "sync_defaults_updated_at": None,
-    }
-    record.update(overrides)
-    return record
-
-
 def test_default_config_enables_plugin():
     from hermes_cli.config import DEFAULT_CONFIG
 
     assert "odoo-hedge-server" in DEFAULT_CONFIG["plugins"]["enabled"]
-    assert DEFAULT_CONFIG["odoo_hedge_server"]["api_base_url"] == "http://127.0.0.1:18080"
-    assert DEFAULT_CONFIG["odoo_hedge_server"]["timeout_seconds"] == 1200
+    server = DEFAULT_CONFIG["mcp_servers"]["odoo-hedge-server"]
+    assert server["url"] == "http://192.168.139.7:18079/mcp"
+    assert server["timeout"] == 1200
 
 
-def test_create_body_preserves_custom_slug_for_default_target():
-    plugin = _load_plugin()
-
-    body = plugin._create_body(
-        {
-            "user_name": "Alice",
-            "slug": "demo-a",
-            "use_default": "true",
-            "branch": "17.0",
-            "commit": "abcdef1",
-            "tag": "2026.6.1",
-        }
-    )
-
-    assert body == {"owner": "Alice", "slug": "demo-a"}
-
-
-def test_register_exposes_odoo_toolset_and_slack_hook():
+def test_register_exposes_slack_command_and_hook_without_tools():
     plugin = _load_plugin()
 
     class FakeCtx:
@@ -188,80 +144,8 @@ def test_register_exposes_odoo_toolset_and_slack_hook():
 
     assert ctx.commands[0][0][0] == "odoo-hedge-server"
     assert "升级" not in ctx.commands[0][1]["args_hint"]
-    assert {call[1]["toolset"] for call in ctx.tools} == {"odoo_hedge_server"}
-    assert {call[1]["name"] for call in ctx.tools} == {
-        "odoo_sandbox_create",
-        "odoo_sandbox_provision_sync_defaults",
-        "odoo_sandbox_list",
-        "odoo_sandbox_get",
-        "odoo_sandbox_destroy",
-    }
+    assert ctx.tools == []
     assert ctx.hooks[0][0][0] == "pre_gateway_dispatch"
-
-
-def test_create_tool_posts_owner_slug_and_default_target(monkeypatch):
-    plugin = _load_plugin()
-    calls = []
-
-    def fake_api(method, path, body=None):
-        calls.append((method, path, body))
-        return _sandbox_record(slug=body["slug"], branch=None)
-
-    monkeypatch.setattr(plugin, "_api_request_sync", fake_api)
-
-    payload = json.loads(
-        plugin._odoo_sandbox_create_tool({"owner": "Alice", "slug": "demo-a"})
-    )
-
-    assert payload["ok"] is True
-    assert payload["data"]["slug"] == "demo-a"
-    assert calls == [("POST", "/sandboxes", {"owner": "Alice", "slug": "demo-a"})]
-
-
-def test_create_tool_returns_backend_error_details(monkeypatch):
-    plugin = _load_plugin()
-
-    def fake_api(method, path, body=None):
-        del method, path, body
-        raise plugin.SandboxApiError(
-            "Docker build failed while ensuring sandbox image.",
-            status=502,
-            code="docker_image_build_failed",
-            details={"image_ensure": {"error": "Dockerfile.sandbox not found"}},
-        )
-
-    monkeypatch.setattr(plugin, "_api_request_sync", fake_api)
-
-    payload = json.loads(plugin._odoo_sandbox_create_tool({"owner": "Alice"}))
-
-    assert payload["ok"] is False
-    assert payload["status"] == 502
-    assert payload["code"] == "docker_image_build_failed"
-    assert payload["details"]["image_ensure"]["error"] == "Dockerfile.sandbox not found"
-
-
-def test_provision_get_list_and_destroy_tools_call_expected_paths(monkeypatch):
-    plugin = _load_plugin()
-    calls = []
-
-    def fake_api(method, path, body=None):
-        calls.append((method, path, body))
-        if method == "GET" and path == "/sandboxes":
-            return [_sandbox_record()]
-        return _sandbox_record(slug="demo-a")
-
-    monkeypatch.setattr(plugin, "_api_request_sync", fake_api)
-
-    assert json.loads(plugin._odoo_sandbox_provision_sync_defaults_tool({"slug": "demo-a"}))["ok"]
-    assert json.loads(plugin._odoo_sandbox_get_tool({"slug": "demo-a"}))["ok"]
-    assert json.loads(plugin._odoo_sandbox_list_tool({}))["ok"]
-    assert json.loads(plugin._odoo_sandbox_destroy_tool({"slug": "demo-a"}))["ok"]
-    assert calls == [
-        ("POST", "/sandboxes/demo-a/provision-sync-defaults", None),
-        ("GET", "/sandboxes/demo-a", None),
-        ("GET", "/sandboxes", None),
-        ("POST", "/sandboxes/demo-a/destroy", None),
-    ]
 
 
 @pytest.mark.asyncio
