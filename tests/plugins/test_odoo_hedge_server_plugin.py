@@ -20,6 +20,12 @@ PLUGIN_PATH = (
     / "odoo-hedge-server"
     / "__init__.py"
 )
+SKILL_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "skills"
+    / "odoo-hedge-server"
+    / "SKILL.md"
+)
 
 
 def _load_plugin():
@@ -119,6 +125,28 @@ def test_default_config_enables_plugin():
     server = DEFAULT_CONFIG["mcp_servers"]["odoo-hedge-server"]
     assert server["url"] == "http://192.168.139.7:18079/mcp"
     assert server["timeout"] == 1200
+
+
+def test_skill_keeps_core_tools_and_documents_operation_map():
+    skill = SKILL_PATH.read_text(encoding="utf-8")
+
+    for tool_name in (
+        "mcp_odoo_hedge_server_sandbox_healthz",
+        "mcp_odoo_hedge_server_ensure_sandbox_version",
+        "mcp_odoo_hedge_server_create_sandbox",
+        "mcp_odoo_hedge_server_upgrade_sandbox",
+        "mcp_odoo_hedge_server_list_sandboxes",
+        "mcp_odoo_hedge_server_get_sandbox",
+        "mcp_odoo_hedge_server_destroy_sandbox",
+        "mcp_odoo_hedge_server_provision_sync_defaults",
+    ):
+        assert f"`{tool_name}`" in skill
+
+    assert "Forward-Compatible Tool Map" in skill
+    assert "`mcp_odoo_hedge_server_list_prompts`" in skill
+    assert "`mcp_odoo_hedge_server_get_prompt`" in skill
+    assert "`mcp_odoo_hedge_server_list_resources`" in skill
+    assert "`mcp_odoo_hedge_server_read_resource`" in skill
 
 
 def test_register_exposes_slack_command_and_hook_without_tools():

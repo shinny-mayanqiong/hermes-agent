@@ -26,6 +26,32 @@ Use these tools:
 - `mcp_odoo_hedge_server_destroy_sandbox`
 - `mcp_odoo_hedge_server_provision_sync_defaults`
 
+## Forward-Compatible Tool Map
+
+Treat the listed tools above as the stable core map. Do not change the known
+create, upgrade, status, and destroy workflows just because other MCP tools
+exist.
+
+When a user asks for an Odoo sandbox capability that is not covered by the
+stable core workflows, discover the current MCP operation map before answering
+or improvising:
+
+1. Call `mcp_odoo_hedge_server_list_prompts`; if a prompt name or description
+   mentions tool map, operations, capabilities, workflow, or sandbox actions,
+   call `mcp_odoo_hedge_server_get_prompt` for that prompt.
+2. Call `mcp_odoo_hedge_server_list_resources`; if a resource URI, name, or
+   description mentions tool map, operations, capabilities, workflow, or
+   sandbox actions, call `mcp_odoo_hedge_server_read_resource` for that
+   resource.
+3. Use the returned map to choose the relevant `mcp_odoo_hedge_server_*` tool
+   and its required arguments.
+
+If the operation map exposes a new destructive or state-changing tool, ask for
+explicit confirmation before calling it. If the map is unavailable, ambiguous,
+or conflicts with the user request, ask one short clarifying question instead
+of guessing. Never use map discovery to bypass the confirmation and target
+rules in this skill.
+
 ## Intent Routing
 
 - Create: create, deploy, start, new, 创建, 部署, 启动, 新建.
