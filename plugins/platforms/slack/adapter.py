@@ -79,6 +79,18 @@ class _ThreadContextCache:
     parent_text: str = ""  # Raw text of the thread parent (for reply_to_text injection)
 
 
+def _is_human_only_message(text: str) -> bool:
+    """Return True when a Slack message is explicitly for humans only."""
+    stripped = (text or "").lstrip()
+    if not stripped:
+        return False
+    marker = "!human"
+    lowered = stripped.lower()
+    return lowered == marker or (
+        lowered.startswith(marker) and stripped[len(marker)].isspace()
+    )
+
+
 def check_slack_requirements() -> bool:
     """Check if Slack dependencies are available.
 
@@ -2382,6 +2394,13 @@ class SlackAdapter(BasePlatformAdapter):
             return
 
         original_text = event.get("text", "")
+        if _is_human_only_message(original_text):
+            logger.info(
+                "[Slack] Ignoring human-only message in channel=%s thread=%s",
+                event.get("channel", ""),
+                event.get("thread_ts", ""),
+            )
+            return
 
         # Slack blocks native slash commands inside threads ("/queue is not
         # supported in threads. Sorry!").  As a workaround, recognise a

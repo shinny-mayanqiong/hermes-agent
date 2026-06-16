@@ -1220,6 +1220,33 @@ class TestBangPrefixCommands:
         assert msg_event.message_type != MessageType.COMMAND
 
     @pytest.mark.asyncio
+    async def test_human_only_prefix_is_ignored(self, adapter):
+        """``!human`` messages are for people in Slack, not Hermes."""
+        await adapter._handle_slack_message(self._make_event("!human 请大家先看这里"))
+
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_human_only_prefix_is_case_insensitive(self, adapter):
+        await adapter._handle_slack_message(self._make_event("  !Human FYI only"))
+
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_human_only_prefix_accepts_newline(self, adapter):
+        await adapter._handle_slack_message(self._make_event("!human\n请大家看一下"))
+
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_human_like_word_is_not_ignored(self, adapter):
+        await adapter._handle_slack_message(self._make_event("!humanity matters"))
+
+        adapter.handle_message.assert_called_once()
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "!humanity matters"
+
+    @pytest.mark.asyncio
     async def test_bang_with_bot_suffix_resolves(self, adapter):
         """``!stop@hermes`` matches the get_command() ``@suffix`` stripping."""
         await adapter._handle_slack_message(self._make_event("!stop@hermes"))
