@@ -133,13 +133,23 @@ profile 配置文件：
 
 ## 多角色开发 profiles
 
-已从 `odoo-hedge-dev` clone 出 6 个角色 profiles：
+已从 `odoo-hedge-dev` clone 出 V2 角色 profiles：
 
 - `odoo-hedge-orchestrator`
+- `odoo-hedge-spec`
+- `odoo-hedge-spec-reviewer`
+- `odoo-hedge-coder`
+- `odoo-hedge-ci`
+- `odoo-hedge-code-reviewer`
+- `odoo-hedge-pr-reviewer`
+- `odoo-hedge-closeout`
+- `odoo-hedge-i18n`
+- `odoo-hedge-project`
+
+历史 V1 profiles 仍保留：
+
 - `odoo-hedge-architect`
 - `odoo-hedge-design-reviewer`
-- `odoo-hedge-coder`
-- `odoo-hedge-spec-reviewer`
 - `odoo-hedge-qa`
 
 这些 profiles 继承了：
@@ -152,11 +162,11 @@ profile 隔离 HOME 约定：
 
 - 所有 `odoo-hedge-*` 开发 profiles 均使用
   `~/.hermes/profiles/<profile>/home/` 作为 worker 子进程 HOME。
-- 现有 7 个 profiles 已统一设置 `home/.gitconfig`：
+- 所有当前 `odoo-hedge-*` 开发 profiles 已统一设置 `home/.gitconfig`：
   `Hermes Hedge Agent <hermes-hedge-agent@users.noreply.github.com>`。
-- 现有 7 个 profiles 已安装 GitHub CLI 配置到
-  `home/.config/gh/hosts.yml` 和 `home/.config/gh/config.yml`，用于 worker
-  内执行 `gh pr create`。
+- 所有当前 `odoo-hedge-*` 开发 profiles 已在隔离 HOME 内完成
+  `gh auth login --with-token --insecure-storage`，用于 worker 内执行
+  `gh pr create`、读取 PR comments 和更新 Project。
 - `GH_TOKEN` 不作为 worker 认证方案；它在 Hermes terminal 环境中属于安全
   blocklist，`terminal.env_passthrough` 不会让它进入子进程。
 

@@ -58,7 +58,7 @@ spec discussion -> spec freeze -> blueprint -> spec/blueprint review
 如果没有 issue，流程先阻塞，等待用户确认是否创建 issue；创建 issue 不属于
 默认 delivery graph。
 
-当前 `odoo-hedge-workflow` plugin 仍处于 V1 实现，runbook 见：
+当前 `odoo-hedge-workflow` plugin 已按 V2 skill-based workflow 实现，runbook 见：
 
 - `runbooks/odoo-hedge-workflow-plugin.md`
 

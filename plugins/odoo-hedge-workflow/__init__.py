@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .cli import odoo_hedge_workflow_command, register_cli
+from .workflow import kanban_spawn_override
 
 
 def register(ctx) -> None:
@@ -16,3 +17,4 @@ def register(ctx) -> None:
             "Creates root tasks, advances dynamic DAG phases, and reports status."
         ),
     )
+    ctx.register_hook("kanban_spawn_override", kanban_spawn_override)

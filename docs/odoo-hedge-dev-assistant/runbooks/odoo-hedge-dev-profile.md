@@ -138,18 +138,18 @@ Hermes worker 的 `gh` 也读取 profile 隔离 HOME 下的配置：
 ```
 
 如果要让 worker 能创建 PR，需要给每个相关 profile 安装 GitHub CLI 登录
-配置。当前做法是把用户已登录的 `gh` 配置复制到 profile 隔离 HOME。
+配置。仅复制 `~/.config/gh` 不一定足够，因为 `gh` token 可能来自系统
+credential store。当前做法是在 profile 隔离 HOME 中写入可直接使用的
+plain text `gh` token：
 
 ```bash
 profile=odoo-hedge-coder
-gh_dir="/home/user/.hermes/profiles/$profile/home/.config/gh"
+home="/home/user/.hermes/profiles/$profile/home"
 
-mkdir -p "$gh_dir"
-install -m 600 /home/user/.config/gh/hosts.yml "$gh_dir/hosts.yml"
-install -m 600 /home/user/.config/gh/config.yml "$gh_dir/config.yml"
-chmod 700 "/home/user/.hermes/profiles/$profile/home"
-chmod 700 "/home/user/.hermes/profiles/$profile/home/.config"
-chmod 710 "$gh_dir"
+mkdir -p "$home/.config/gh"
+gh auth token | HOME="$home" gh auth login -h github.com --with-token --insecure-storage
+chmod 700 "$home" "$home/.config" "$home/.config/gh"
+chmod 600 "$home/.config/gh/hosts.yml" "$home/.config/gh/config.yml"
 ```
 
 注意：`GH_TOKEN` 在 Hermes terminal 子进程环境中属于安全 blocklist，

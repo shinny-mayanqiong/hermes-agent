@@ -192,6 +192,11 @@ VALID_HOOKS: Set[str] = {
     "kanban_task_claimed",
     "kanban_task_completed",
     "kanban_task_blocked",
+    # Kanban dispatcher spawn override. Fired after a task is claimed and its
+    # workspace is resolved, before the default Hermes worker subprocess is
+    # spawned. The first callback returning an int PID owns the spawn.
+    # Kwargs: task: kanban_db.Task, workspace: str, board: str | None.
+    "kanban_spawn_override",
 }
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"

@@ -7305,6 +7305,22 @@ def _default_spawn(
     if not task.assignee:
         raise ValueError(f"task {task.id} has no assignee")
 
+    try:
+        from hermes_cli.plugins import discover_plugins, invoke_hook
+
+        discover_plugins()
+
+        for ret in invoke_hook(
+            "kanban_spawn_override",
+            task=task,
+            workspace=workspace,
+            board=board,
+        ):
+            if isinstance(ret, int) and ret > 0:
+                return ret
+    except Exception as exc:
+        _log.debug("kanban spawn override hook failed: %s", exc, exc_info=True)
+
     from hermes_cli.profiles import normalize_profile_name
 
     profile_arg = normalize_profile_name(task.assignee)

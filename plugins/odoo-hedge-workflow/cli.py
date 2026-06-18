@@ -43,6 +43,14 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     p_status.add_argument("root_task_id", help="Workflow root task id")
     p_status.add_argument("--json", action="store_true", help="Emit JSON")
 
+    p_worker = sub.add_parser(
+        "codex-exec-worker",
+        help=argparse.SUPPRESS,
+        description="Internal worker entrypoint used by the Kanban dispatcher.",
+    )
+    p_worker.add_argument("task_id", help="Kanban task id")
+    p_worker.add_argument("--json", action="store_true", help="Emit JSON")
+
 
 def _print_result(result: dict, *, as_json: bool) -> None:
     if as_json:
@@ -79,7 +87,8 @@ def _print_result(result: dict, *, as_json: bool) -> None:
             print(
                 f"  - {child['id']} {child['status']:8s} "
                 f"{child.get('phase') or '?'} v{child.get('iteration') or '?'} "
-                f"-> {child.get('assignee') or '(unassigned)'}"
+                f"-> {child.get('assignee') or '(unassigned)'} "
+                f"[{child.get('execution_backend') or 'hermes_worker'}]"
             )
         if result.get("next_action"):
             print(f"Next:    {result['next_action']}")
@@ -118,6 +127,10 @@ def odoo_hedge_workflow_command(args: argparse.Namespace) -> int:
         if command == "status":
             result = workflow.workflow_status(args.root_task_id, board=args.board)
             _print_result(result, as_json=args.json)
+            return 0
+        if command == "codex-exec-worker":
+            result = workflow.run_codex_exec_worker(args.task_id, board=args.board)
+            _print_result(result, as_json=True)
             return 0
     except Exception as exc:
         print(f"odoo-hedge-workflow: {exc}", file=sys.stderr)

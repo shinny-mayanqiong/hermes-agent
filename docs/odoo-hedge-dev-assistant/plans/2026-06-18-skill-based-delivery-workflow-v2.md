@@ -423,19 +423,21 @@ closeout.md
 
 如果 task 较小，可以合并报告文件，但 summary JSON 必须指向实际 artifact path。
 
-## Plugin 实现影响
+## Plugin 实现状态
 
-当前 `odoo-hedge-workflow` plugin 仍是 V1 阶段状态机。迁移到 V2 时需要：
+`odoo-hedge-workflow` plugin 已按 V2 接入：
 
-1. 更新 phase 列表和 phase -> profile 映射。
-2. 支持 per-phase required skills。
-3. 支持 per-phase execution backend，首个后端可以是 `codex_exec`。
-4. `start` 第一阶段从 `architect_design` 改为 `spec_discussion`。
+1. phase 列表和 phase -> profile 映射已更新为 V2。
+2. child task metadata 记录 per-phase `skill`。
+3. child task metadata 记录 per-phase `execution_backend`。
+4. `start` 第一阶段为 `spec_discussion`。
 5. `tick` 根据 V2 summary JSON 决定下一阶段。
-6. 支持 `spec_blueprint_review` 和 `local_code_review` 两个 review gate。
-7. 支持 `i18n_check` 和 `project_followup` 条件分支。
-8. 保留 root task `blocked` controller 约定。
+6. 已支持 `spec_blueprint_review` 和 `local_code_review` 两个 review gate。
+7. 已支持 `i18n_check` 和 `project_followup` 条件分支。
+8. root task 保持 sticky `blocked` controller 约定，避免被 dispatcher 领取。
 9. 保留 issue worktree resolve / create 约定。
+10. `codex_exec` backend 通过 Kanban spawn override 接入 dispatcher；wrapper
+    在 issue worktree 内执行 `codex exec` 并把 summary JSON 回写到 task。
 
 ## 当前决策
 
@@ -444,4 +446,4 @@ closeout.md
 - 允许部分 phase 使用 `codex exec` 作为 worker 执行后端，但 Hermes 仍负责
   Kanban 编排、状态记录、gate 和 `tick`。
 - 保留旧 V1 文档作为历史与当前 plugin 状态说明。
-- 下一步先改 plugin phase map，再创建缺失 profiles。
+- 下一步创建缺失 profiles，并在真实 issue 上执行端到端 dry run。
