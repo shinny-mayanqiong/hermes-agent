@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from hermes_cli import kanban_db as kb
@@ -73,6 +76,17 @@ class WorkflowMeta:
     base_branch: str
 
 
+@dataclass(frozen=True)
+class WorktreeResolution:
+    repo: str
+    worktree: str
+    branch: str | None
+    topic: str | None
+    topic_source: str | None
+    source: str
+    resources: dict[str, Any]
+
+
 def _json_block(data: dict[str, Any]) -> str:
     return "```json\n" + json.dumps(data, ensure_ascii=False, indent=2) + "\n```"
 
@@ -108,7 +122,333 @@ def _workflow_id(issue: int) -> str:
     return f"issue-{issue}"
 
 
-def _root_body(*, issue: int, repo: str, worktree: str | None, base_branch: str) -> str:
+def _slugify(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower())
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug[:64]
+
+
+def _valid_topic(value: str | None) -> str | None:
+    topic = (value or "").strip()
+    if not topic:
+        return None
+    if re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", topic):
+        return topic
+    return None
+
+
+def _issue_slug(issue: int, topic: str | None) -> str:
+    topic = _valid_topic(topic) or _slugify(topic or "")
+    return f"issue-{issue}-{topic}" if topic else f"issue-{issue}"
+
+
+def _default_worktree_root(repo: Path) -> Path:
+    override = os.environ.get("WORKTREE_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return (repo.parent / "odoo-hedge-worktrees").resolve()
+
+
+def _branch_short(ref: str | None) -> str | None:
+    if not ref:
+        return None
+    return ref.removeprefix("refs/heads/")
+
+
+def _parse_worktree_list(output: str) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line:
+            if current:
+                entries.append(current)
+                current = {}
+            continue
+        key, _, value = line.partition(" ")
+        current[key] = value
+    if current:
+        entries.append(current)
+    return entries
+
+
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _matching_issue_worktree(repo: Path, issue: int) -> tuple[str, str | None] | None:
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    repo_real = repo.resolve()
+    worktree_root = _default_worktree_root(repo_real)
+    issue_re = re.compile(rf"(^|[/-])issue-{issue}($|[-_/])")
+    candidates: list[tuple[int, str, str]] = []
+
+    for entry in _parse_worktree_list(proc.stdout):
+        raw_path = entry.get("worktree")
+        if not raw_path:
+            continue
+        path = Path(raw_path).expanduser().resolve()
+        if path == repo_real:
+            continue
+        branch = _branch_short(entry.get("branch"))
+        haystacks = [branch or "", path.name]
+        if not any(issue_re.search(value) for value in haystacks):
+            continue
+
+        under_default_root = _path_is_relative_to(path, worktree_root)
+        branch_priority = 2
+        if branch == f"codex/issue-{issue}":
+            branch_priority = 0
+        elif branch and branch.startswith(f"codex/issue-{issue}-"):
+            branch_priority = 1
+        priority = (0 if under_default_root else 10) + branch_priority
+        candidates.append((priority, str(path), branch or ""))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    _, path, branch = candidates[0]
+    return path, branch or None
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip().strip('"').strip("'")
+        values[key.strip()] = value
+    return values
+
+
+def _read_conf_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith(";") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def _worktree_resources(worktree: Path) -> dict[str, Any]:
+    env = _read_env_file(worktree / ".env")
+    config = env.get("ODOO_CONFIG") or "odoo.local.conf"
+    config_path = Path(config)
+    if not config_path.is_absolute():
+        config_path = worktree / config_path
+    conf = _read_conf_file(config_path)
+    db_name = env.get("ODOO_DB_NAME")
+    return {
+        "odoo_db_name": db_name,
+        "odoo_test_db_name": f"{db_name}_test" if db_name else None,
+        "python_venv_path": env.get("PYTHON_VENV_PATH"),
+        "odoo_config": config,
+        "http_port": conf.get("http_port"),
+        "gevent_port": conf.get("gevent_port"),
+    }
+
+
+def _github_repo_slug(repo: Path) -> str | None:
+    try:
+        remote = subprocess.run(
+            ["git", "-C", str(repo), "remote", "get-url", "origin"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError:
+        return None
+
+    match = re.search(r"github\.com[:/]([^/]+)/([^/.]+)(?:\.git)?$", remote)
+    if not match:
+        return None
+    return f"{match.group(1)}/{match.group(2)}"
+
+
+def _topic_from_issue_body(repo: Path, issue: int) -> tuple[str | None, str | None]:
+    repo_slug = _github_repo_slug(repo) or "shinnytech/odoo-hedge"
+    try:
+        body = subprocess.run(
+            [
+                "gh",
+                "issue",
+                "view",
+                str(issue),
+                "--repo",
+                repo_slug,
+                "--json",
+                "body",
+                "--jq",
+                ".body",
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None, None
+
+    match = re.search(
+        r"(?im)^##\s+Topic\s*$\s*([^\n#][^\n]*)",
+        body,
+    )
+    if not match:
+        return None, None
+    topic = _valid_topic(match.group(1))
+    if not topic:
+        return None, None
+    return topic, "issue_body"
+
+
+def _resolve_topic(repo: Path, issue: int, topic: str | None) -> tuple[str | None, str | None]:
+    explicit = _valid_topic(topic)
+    if explicit:
+        return explicit, "explicit"
+    if topic and topic.strip():
+        return _slugify(topic), "explicit_slugified"
+    return _topic_from_issue_body(repo, issue)
+
+
+def _ensure_existing_worktree(path: str) -> Path:
+    worktree = Path(path).expanduser().resolve()
+    if not worktree.exists():
+        raise ValueError(f"worktree path does not exist: {worktree}")
+    subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "--git-dir"],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return worktree
+
+
+def _branch_for_issue(issue: int, branch: str | None, topic: str | None) -> str:
+    if branch and branch.strip():
+        return branch.strip()
+    return f"codex/{_issue_slug(issue, topic)}"
+
+
+def _create_worktree(repo: Path, issue: int, base_branch: str, branch: str | None, topic: str | None) -> tuple[Path, str]:
+    final_branch = _branch_for_issue(issue, branch, topic)
+    script = repo / "scripts" / "codex-worktree.sh"
+    if not script.exists():
+        raise ValueError(f"worktree bootstrap script not found: {script}")
+    subprocess.run(
+        [str(script), "create", final_branch, base_branch, "--no-codex"],
+        cwd=str(repo),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    safe_branch = final_branch.replace("/", "-")
+    worktree = _default_worktree_root(repo) / safe_branch
+    if not worktree.exists():
+        raise ValueError(f"worktree script completed but path was not created: {worktree}")
+    return worktree.resolve(), final_branch
+
+
+def _resolve_worktree(
+    *,
+    issue: int,
+    repo: str,
+    worktree: str | None,
+    base_branch: str,
+    branch: str | None,
+    topic: str | None,
+    create_worktree: bool,
+) -> WorktreeResolution:
+    repo_path = Path(repo).expanduser().resolve()
+    if not repo_path.exists():
+        raise ValueError(f"repo path does not exist: {repo_path}")
+
+    if worktree:
+        worktree_path = _ensure_existing_worktree(worktree)
+        topic_value, topic_source = _resolve_topic(repo_path, issue, topic)
+        try:
+            branch_name = subprocess.run(
+                ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "HEAD"],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+        except subprocess.CalledProcessError:
+            branch_name = branch
+        return WorktreeResolution(
+            repo=str(repo_path),
+            worktree=str(worktree_path),
+            branch=branch_name or branch,
+            topic=topic_value,
+            topic_source=topic_source,
+            source="explicit",
+            resources=_worktree_resources(worktree_path),
+        )
+
+    topic_value, topic_source = _resolve_topic(repo_path, issue, topic)
+    existing = _matching_issue_worktree(repo_path, issue)
+    if existing:
+        path, branch_name = existing
+        worktree_path = Path(path).resolve()
+        return WorktreeResolution(
+            repo=str(repo_path),
+            worktree=str(worktree_path),
+            branch=branch_name,
+            topic=topic_value,
+            topic_source=topic_source,
+            source="existing",
+            resources=_worktree_resources(worktree_path),
+        )
+
+    if not create_worktree:
+        raise ValueError(
+            f"no existing worktree found for issue {issue}; rerun without --no-create-worktree "
+            "or pass --worktree explicitly"
+        )
+
+    worktree_path, branch_name = _create_worktree(repo_path, issue, base_branch, branch, topic_value)
+    return WorktreeResolution(
+        repo=str(repo_path),
+        worktree=str(worktree_path),
+        branch=branch_name,
+        topic=topic_value,
+        topic_source=topic_source,
+        source="created",
+        resources=_worktree_resources(worktree_path),
+    )
+
+
+def _root_body(
+    *,
+    issue: int,
+    repo: str,
+    worktree: str,
+    base_branch: str,
+    branch: str | None,
+    topic: str | None,
+    topic_source: str | None,
+    worktree_source: str,
+    worktree_resources: dict[str, Any],
+) -> str:
     data = {
         "workflow_type": WORKFLOW_TYPE,
         "workflow_id": _workflow_id(issue),
@@ -116,7 +456,12 @@ def _root_body(*, issue: int, repo: str, worktree: str | None, base_branch: str)
         "issue": issue,
         "repo": repo,
         "worktree": worktree,
+        "branch": branch,
+        "topic": topic,
+        "topic_source": topic_source,
         "base_branch": base_branch,
+        "worktree_source": worktree_source,
+        "worktree_resources": worktree_resources,
         "current_phase": "architect_design",
         "iteration": 1,
         "status": "running",
@@ -152,7 +497,10 @@ def _child_body(
         "issue": root_meta.get("issue"),
         "repo": root_meta.get("repo"),
         "worktree": root_meta.get("worktree"),
+        "branch": root_meta.get("branch"),
+        "topic": root_meta.get("topic"),
         "base_branch": root_meta.get("base_branch"),
+        "worktree_resources": root_meta.get("worktree_resources") or {},
         "parent_task_id": parent_task_id,
         "allowed_actions": PHASE_ALLOWED_ACTIONS.get(phase, []),
         "forbidden_actions": PHASE_FORBIDDEN_ACTIONS.get(phase, []),
@@ -253,14 +601,66 @@ def _create_child_task(
         body=body,
         assignee=PHASE_ASSIGNEE[phase],
         created_by=WORKFLOW_PLUGIN_AUTHOR,
-        workspace_kind="dir" if root_meta.get("worktree") else "dir",
-        workspace_path=root_meta.get("worktree") or root_meta.get("repo"),
+        workspace_kind="worktree",
+        workspace_path=root_meta.get("worktree"),
+        branch_name=root_meta.get("branch"),
         priority=0,
         parents=[parent_task_id] if parent_task_id else [],
         idempotency_key=f"{root_meta['workflow_id']}:{root.id}:{phase}:{iteration}:{parent_task_id or 'initial'}",
         board=board,
     )
+    _refresh_task_workspace(
+        conn,
+        task_id,
+        body=body,
+        workspace_path=root_meta.get("worktree"),
+        branch_name=root_meta.get("branch"),
+    )
     return task_id
+
+
+def _refresh_task_workspace(
+    conn,
+    task_id: str,
+    *,
+    body: str,
+    workspace_path: str | None,
+    branch_name: str | None,
+    status: str | None = None,
+) -> None:
+    status_sql = ", status = ?" if status else ""
+    params: list[Any] = [body, workspace_path, branch_name]
+    if status:
+        params.append(status)
+    params.append(task_id)
+    with kb.write_txn(conn):
+        conn.execute(
+            f"""
+            UPDATE tasks
+               SET body = ?,
+                   workspace_kind = 'worktree',
+                   workspace_path = ?,
+                   branch_name = ?
+                   {status_sql}
+             WHERE id = ?
+            """,
+            tuple(params),
+        )
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'edited', ?, strftime('%s','now'))",
+            (
+                task_id,
+                json.dumps(
+                    {
+                        "source": WORKFLOW_PLUGIN_AUTHOR,
+                        "reason": "refresh workflow worktree metadata",
+                        "workspace_path": workspace_path,
+                        "branch_name": branch_name,
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
 
 
 def start_workflow(
@@ -270,21 +670,53 @@ def start_workflow(
     repo: str,
     worktree: str | None,
     base_branch: str,
+    branch: str | None = None,
+    topic: str | None = None,
+    create_worktree: bool = True,
     title: str | None = None,
 ) -> dict[str, Any]:
+    resolved = _resolve_worktree(
+        issue=issue,
+        repo=repo,
+        worktree=worktree,
+        base_branch=base_branch,
+        branch=branch,
+        topic=topic,
+        create_worktree=create_worktree,
+    )
     root_title = title or f"Issue #{issue}: dynamic delivery workflow"
+    root_body = _root_body(
+        issue=issue,
+        repo=resolved.repo,
+        worktree=resolved.worktree,
+        base_branch=base_branch,
+        branch=resolved.branch,
+        topic=resolved.topic,
+        topic_source=resolved.topic_source,
+        worktree_source=resolved.source,
+        worktree_resources=resolved.resources,
+    )
     with kb.connect_closing(board=board) as conn:
         root_id = kb.create_task(
             conn,
             title=root_title,
-            body=_root_body(issue=issue, repo=repo, worktree=worktree, base_branch=base_branch),
+            body=root_body,
             assignee=ORCHESTRATOR,
             created_by=WORKFLOW_PLUGIN_AUTHOR,
-            workspace_kind="dir",
-            workspace_path=worktree or repo,
-            triage=True,
+            workspace_kind="worktree",
+            workspace_path=resolved.worktree,
+            branch_name=resolved.branch,
+            initial_status="blocked",
             idempotency_key=f"{WORKFLOW_TYPE}:{_workflow_id(issue)}:root",
             board=board,
+        )
+        _refresh_task_workspace(
+            conn,
+            root_id,
+            body=root_body,
+            workspace_path=resolved.worktree,
+            branch_name=resolved.branch,
+            status="blocked",
         )
         root = _load_task(conn, root_id)
         root_meta = _validate_root(root)
@@ -306,6 +738,10 @@ def start_workflow(
                     "workflow_started: true",
                     f"created_child_task: {child_id}",
                     "next_phase: architect_design",
+                    f"worktree_source: {resolved.source}",
+                    f"worktree: {resolved.worktree}",
+                    f"branch: {resolved.branch or ''}",
+                    f"topic: {resolved.topic or ''}",
                 ]
             ),
         )
@@ -315,6 +751,12 @@ def start_workflow(
         "root_task_id": root_id,
         "child_task_id": child_id,
         "child_phase": "architect_design",
+        "branch": resolved.branch,
+        "topic": resolved.topic,
+        "topic_source": resolved.topic_source,
+        "worktree": resolved.worktree,
+        "worktree_source": resolved.source,
+        "worktree_resources": resolved.resources,
     }
 
 

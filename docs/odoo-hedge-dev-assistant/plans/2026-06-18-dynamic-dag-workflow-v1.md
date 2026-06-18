@@ -36,6 +36,10 @@ root task assignee 固定为：
 odoo-hedge-orchestrator
 ```
 
+root task 状态固定为 `blocked`，表示它是 controller/state container。
+不要放入 `triage`，否则 Hermes 自带 specifier / decomposer 可能会改写 body
+并把它 promote 成普通 worker task。
+
 root task body 必须包含：
 
 ```yaml
@@ -331,7 +335,8 @@ V1 不先做 repo script 入口。可以把核心逻辑拆成 Python module 以�
 职责：
 
 1. 验证 issue / worktree / repo 参数。
-2. 创建 root task，assignee 固定为 `odoo-hedge-orchestrator`。
+2. 创建 root task，assignee 固定为 `odoo-hedge-orchestrator`，状态固定为
+   `blocked`。
 3. 创建第一步 child task，assignee 为 `odoo-hedge-architect`。
 4. link root / child dependency 或在 root comment 中记录 child id。
 5. 输出 root task id 和第一步 child task id。
@@ -622,9 +627,18 @@ CLI command 只做参数解析和输出，核心判断放在 `workflow.py`，便
 
 实现：
 
-- `start --issue <number> [--worktree <path>]`
+- `start --issue <number> [--worktree <path>] [--branch <branch>] [--topic <topic>] [--no-create-worktree]`
 - `tick <root_task_id> [--plan] [--apply]`
 - `status <root_task_id> [--json]`
+
+`start` 必须先解析 issue worktree：显式 `--worktree` 优先；否则查找匹配
+`issue-<number>` 的已有 worktree；如果不存在，则按 `issue-worktree-bootstrap`
+skill 约定调用 `scripts/codex-worktree.sh create ... --no-codex` 创建。root 和
+child task 的 workspace 必须指向 worktree，不能指向主 repo 根目录。
+
+新建 branch 时优先使用 `issue-<number>-<topic>`：显式 `--branch` 最高优先级；
+显式 `--topic` 次之；未传 `--topic` 时读取 issue body 的 `## Topic`；
+缺失 topic 时 fallback 为 `issue-<number>`，不从中文 title 自动推导 topic。
 
 `tick --plan` 只输出下一步建议，不创建 task。
 

@@ -22,7 +22,14 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     p_start.add_argument("--worktree", default=None, help="Existing worktree path")
     p_start.add_argument("--repo", default="/home/user/Repos/odoo-hedge", help="Repository path")
     p_start.add_argument("--base-branch", default="master", help="Base branch")
+    p_start.add_argument("--branch", default=None, help="Branch to create when no matching worktree exists")
+    p_start.add_argument("--topic", default=None, help="Short topic used for the generated branch name")
     p_start.add_argument("--title", default=None, help="Optional root task title")
+    p_start.add_argument(
+        "--no-create-worktree",
+        action="store_true",
+        help="Fail instead of creating a worktree when no matching worktree exists",
+    )
     p_start.add_argument("--json", action="store_true", help="Emit JSON")
 
     p_tick = sub.add_parser("tick", help="Advance a workflow one controller step")
@@ -47,6 +54,10 @@ def _print_result(result: dict, *, as_json: bool) -> None:
         print(f"Workflow root: {result['root_task_id']}")
         print(f"First child:   {result['child_task_id']} ({result['child_phase']})")
         print(f"Board:         {result['board']}")
+        print(f"Branch:        {result.get('branch') or '(unknown)'}")
+        print(f"Topic:         {result.get('topic') or '(none)'}")
+        print(f"Worktree:      {result.get('worktree') or '(unknown)'}")
+        print(f"Worktree mode: {result.get('worktree_source') or '(unknown)'}")
         return
     if kind == "tick":
         print(f"Action: {result['action']}")
@@ -87,6 +98,9 @@ def odoo_hedge_workflow_command(args: argparse.Namespace) -> int:
                 repo=args.repo,
                 worktree=args.worktree,
                 base_branch=args.base_branch,
+                branch=args.branch,
+                topic=args.topic,
+                create_worktree=not args.no_create_worktree,
                 title=args.title,
             )
             _print_result(result, as_json=args.json)

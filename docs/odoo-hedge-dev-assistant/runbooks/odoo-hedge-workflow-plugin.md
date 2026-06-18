@@ -41,17 +41,70 @@ odoo-hedge-dev
 
 - workflow root task
 - 第一阶段 `architect_design` child task
+- workflow 使用的 issue worktree
 
-root task 使用 `triage` 状态作为 controller 状态容器，避免被 dispatcher
-当成普通 worker task 领取。
+root task 使用 `blocked` 状态作为 controller 状态容器，避免被 specifier /
+decomposer / dispatcher 当成普通 worker task 处理。
 
 示例：
+
+```bash
+hermes -p odoo-hedge-orchestrator odoo-hedge-workflow start --issue 955
+```
+
+worktree 解析规则：
+
+1. 如果传入 `--worktree`，使用该路径并验证它是 git worktree。
+2. 如果未传入，先在 `/home/user/Repos/odoo-hedge-worktrees` 查找匹配
+   `issue-<num>` 的已有 worktree。
+3. 如果没有匹配项，调用 `/home/user/Repos/odoo-hedge/scripts/codex-worktree.sh`
+   创建新 worktree。该行为遵循 `issue-worktree-bootstrap` skill 的约定。
+
+新建 worktree 的 branch topic 规则：
+
+1. `--branch` 最高优先级，完整控制 branch。
+2. `--topic` 次优先级，生成 `codex/issue-<number>-<topic>`。
+3. 未传 `--topic` 时，尝试读取 GitHub issue body 的 `## Topic`，生成
+   `codex/issue-<number>-<topic>`。
+4. 如果没有 topic，fallback 为 `codex/issue-<number>`，不从中文 title 自动推导。
+
+如果已经知道具体 worktree，可以显式传入：
 
 ```bash
 hermes -p odoo-hedge-orchestrator odoo-hedge-workflow start \
   --issue 955 \
   --worktree /home/user/Repos/odoo-hedge-worktrees/codex-issue-955-soft-delete-futures-accounts
 ```
+
+如果要控制新 worktree 的 branch：
+
+```bash
+hermes -p odoo-hedge-orchestrator odoo-hedge-workflow start \
+  --issue 955 \
+  --branch codex/issue-955-soft-delete-futures-accounts
+```
+
+如果只控制 topic：
+
+```bash
+hermes -p odoo-hedge-orchestrator odoo-hedge-workflow start \
+  --issue 955 \
+  --topic soft-delete-futures-accounts
+```
+
+如果只想检查是否存在 worktree，不允许自动创建：
+
+```bash
+hermes -p odoo-hedge-orchestrator odoo-hedge-workflow start \
+  --issue 955 \
+  --no-create-worktree
+```
+
+root task 保持 `blocked`，只由 `odoo-hedge-workflow tick` 读取和更新；
+不要 unblock / promote root task。root/child task 的 workspace 必须是
+worktree，不是主 repo 根目录。
+task metadata 会记录 branch、worktree、`ODOO_DB_NAME`、test DB、
+`PYTHON_VENV_PATH`、`ODOO_CONFIG`、http/gevent ports。
 
 ## `tick`
 
@@ -97,7 +150,7 @@ qa_verify pass=true -> pr_ci
 
 - plugin command 可被 `odoo-hedge-dev` 和 `odoo-hedge-orchestrator` 发现。
 - `start` 可创建 root task 和 `architect_design` child task。
-- root task 保持 `triage`，不会被 dispatcher 领取。
+- root task 保持 `blocked`，不会被 specifier / decomposer / dispatcher 领取。
 - `tick --plan` 在没有 completed child 时返回 wait。
 - `tick --apply` 可从 completed `architect_design` 创建 `design_review`。
 - `design_review approved=false` 后，`tick --apply` 可创建
