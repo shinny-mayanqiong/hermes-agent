@@ -56,3 +56,10 @@ YYYY-MM-DD-short-topic.md
 - 为 `odoo-hedge` 创建开发工作流 skill
 - 配置 Slack gateway 的用户和频道 allowlist
 - 建立 dashboard `--tui` 日常使用 runbook
+
+## 当前重点文档
+
+- `2026-06-18-task-t_2a9c7cd8-retrospective.md` - 复盘普通 task 绕过
+  多角色流程的问题。
+- `2026-06-18-dynamic-dag-workflow-v1.md` - 定义动态 DAG workflow、
+  orchestrator tick、阶段状态机和 worker role policy。
