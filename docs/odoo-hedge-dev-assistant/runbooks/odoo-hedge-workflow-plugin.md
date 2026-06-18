@@ -138,6 +138,15 @@ task metadata 会记录 branch、worktree、`ODOO_DB_NAME`、test DB、
 
 `tick --apply` 创建下一阶段 child task，并写 root comment。
 
+review gate 的 task result 必须包含结构化布尔字段：
+
+- `spec_blueprint_review`：`"approved": true/false`
+- `local_code_review`：`"approved": true/false`
+
+plugin 会兼容 `review_decision=approved_with_non_blocking_notes` 这类常见
+review 输出，但不能依赖 LLM 每次都严格遵守格式；缺少必需字段时，`tick`
+不会再把 child 标记为 processed，方便回填 result 后重新推进。
+
 ## V2 phase map
 
 主流程：

@@ -58,6 +58,57 @@ PHASE_SCHEMA = {
     "project_followup": "project_followup_v2",
 }
 
+PHASE_OUTPUT_EXTRAS = {
+    "implementation": {
+        "artifacts": [],
+        "blockers": [],
+        "needs_user_input": False,
+        "needs_followup_issue": False,
+        "requires_i18n": False,
+    },
+    "ci_watch_repair": {
+        "success": True,
+        "ci_failed": False,
+        "artifacts": [],
+        "blockers": [],
+    },
+    "spec_blueprint_review": {
+        "approved": True,
+        "review_decision": "approved|changes_requested",
+        "return_phase": "blueprint_prompts",
+        "blocking_findings": [],
+        "non_blocking_findings": [],
+    },
+    "local_code_review": {
+        "approved": True,
+        "review_decision": "approved|changes_requested",
+        "blocking_findings": [],
+        "non_blocking_findings": [],
+        "requires_i18n": False,
+        "needs_followup_issue": False,
+    },
+    "pr_review_followup": {
+        "comments_resolved": True,
+        "unresolved_comments": [],
+        "artifacts": [],
+    },
+    "closeout_sync": {
+        "closed": True,
+        "artifacts": [],
+        "blockers": [],
+    },
+    "i18n_check": {
+        "success": True,
+        "artifacts": [],
+        "blockers": [],
+    },
+    "project_followup": {
+        "created_issues": [],
+        "return_phase": "implementation",
+        "blockers": [],
+    },
+}
+
 PHASE_SKILL = {
     "spec_discussion": "brainstorm-spec",
     "spec_freeze": "spec-freeze",
@@ -128,6 +179,18 @@ class WorktreeResolution:
 
 def _json_block(data: dict[str, Any]) -> str:
     return "```json\n" + json.dumps(data, ensure_ascii=False, indent=2) + "\n```"
+
+
+def _phase_output_example(root_meta: dict[str, Any], phase: str, iteration: int) -> dict[str, Any]:
+    data = {
+        "workflow_id": root_meta["workflow_id"],
+        "phase": phase,
+        "iteration": iteration,
+        "status": "done",
+        "next_recommended_phase": "<phase>",
+    }
+    data.update(PHASE_OUTPUT_EXTRAS.get(phase, {}))
+    return data
 
 
 def _extract_json_objects(text: str | None) -> list[dict[str, Any]]:
@@ -642,15 +705,7 @@ def _child_body(
         "请严格遵守 metadata 中的 allowed_actions / forbidden_actions。",
         "完成时必须在 task summary/result 中包含一个 JSON object，字段至少包括：",
         "",
-        _json_block(
-            {
-                "workflow_id": root_meta["workflow_id"],
-                "phase": phase,
-                "iteration": iteration,
-                "status": "done",
-                "next_recommended_phase": "<phase>",
-            }
-        ),
+        _json_block(_phase_output_example(root_meta, phase, iteration)),
         "",
         "Task metadata:",
         "",
@@ -904,6 +959,47 @@ def start_workflow(
     }
 
 
+def _normalized_approval(result: dict[str, Any], *, positive_next_phases: set[str]) -> bool | None:
+    approved = result.get("approved")
+    if isinstance(approved, bool):
+        return approved
+
+    for key in ("review_decision", "decision", "verdict"):
+        raw = result.get(key)
+        if not raw:
+            continue
+        value = str(raw).strip().casefold()
+        negative_tokens = (
+            "changes_requested",
+            "change_requested",
+            "request_changes",
+            "requested_changes",
+            "rejected",
+            "blocked",
+            "failed",
+            "not approved",
+            "not_approved",
+        )
+        if any(token in value for token in negative_tokens):
+            return False
+        if any(token in value for token in ("approved", "approve", "pass", "passed", "accepted")):
+            return True
+
+    recommended = str(result.get("next_recommended_phase") or "").strip().casefold()
+    if recommended in {phase.casefold() for phase in positive_next_phases}:
+        return True
+    return None
+
+
+def _should_process_no_next(reason: str) -> bool:
+    lowered = reason.casefold()
+    if "missing" in lowered:
+        return False
+    if "needs user input" in lowered:
+        return False
+    return True
+
+
 def _next_from_child(child: kb.Task) -> tuple[str | None, int, str]:
     meta = _task_meta(child)
     phase = meta.get("phase")
@@ -924,9 +1020,10 @@ def _next_from_child(child: kb.Task) -> tuple[str | None, int, str]:
     if phase == "blueprint_prompts":
         return "spec_blueprint_review", iteration, "blueprint is ready for review"
     if phase == "spec_blueprint_review":
-        if result.get("approved") is True:
+        approved = _normalized_approval(result, positive_next_phases={"implementation", "coder_implementation"})
+        if approved is True:
             return "implementation", iteration, "spec/blueprint review approved"
-        if result.get("approved") is False:
+        if approved is False:
             return_phase = result.get("return_phase") or "blueprint_prompts"
             if return_phase not in {"spec_freeze", "blueprint_prompts"}:
                 return_phase = "blueprint_prompts"
@@ -941,9 +1038,10 @@ def _next_from_child(child: kb.Task) -> tuple[str | None, int, str]:
             return "implementation", iteration + 1, "CI requested fixes"
         return None, iteration, "ci_watch_repair result missing success=true/false"
     if phase == "local_code_review":
-        if result.get("approved") is True:
+        approved = _normalized_approval(result, positive_next_phases={"pr_review_followup"})
+        if approved is True:
             return "pr_review_followup", iteration, "local code review approved"
-        if result.get("approved") is False:
+        if approved is False:
             return "implementation", iteration + 1, "local code review requested changes"
         return None, iteration, "local_code_review result missing approved=true/false"
     if phase == "pr_review_followup":
@@ -993,6 +1091,7 @@ def tick_workflow(*, root_task_id: str, board: str, apply: bool = False) -> dict
 
         if next_phase is None:
             if apply and processed_child is not None:
+                process_child = _should_process_no_next(reason)
                 processed_meta = _task_meta(processed_child)
                 _update_root_progress(
                     conn,
@@ -1008,7 +1107,11 @@ def tick_workflow(*, root_task_id: str, board: str, apply: bool = False) -> dict
                     WORKFLOW_PLUGIN_AUTHOR,
                     "\n".join(
                         [
-                            f"processed_child_task: {processed_child.id}",
+                            (
+                                f"processed_child_task: {processed_child.id}"
+                                if process_child
+                                else f"pending_child_task: {processed_child.id}"
+                            ),
                             f"verdict: {reason}",
                             "created_child_task: none",
                         ]
@@ -1018,7 +1121,16 @@ def tick_workflow(*, root_task_id: str, board: str, apply: bool = False) -> dict
                 "kind": "tick",
                 "action": "no_next_task",
                 "reason": reason,
-                "processed_child_task": processed_child.id if processed_child else None,
+                "processed_child_task": (
+                    processed_child.id
+                    if processed_child and _should_process_no_next(reason)
+                    else None
+                ),
+                "unprocessed_child_task": (
+                    processed_child.id
+                    if processed_child and not _should_process_no_next(reason)
+                    else None
+                ),
             }
 
         if not apply:
