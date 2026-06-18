@@ -148,6 +148,18 @@ profile 配置文件：
 - `model.default: gpt-5.5`
 - `terminal.cwd: /home/user/Repos/odoo-hedge`
 
+profile 隔离 HOME 约定：
+
+- 所有 `odoo-hedge-*` 开发 profiles 均使用
+  `~/.hermes/profiles/<profile>/home/` 作为 worker 子进程 HOME。
+- 现有 7 个 profiles 已统一设置 `home/.gitconfig`：
+  `Hermes Hedge Agent <hermes-hedge-agent@users.noreply.github.com>`。
+- 现有 7 个 profiles 已安装 GitHub CLI 配置到
+  `home/.config/gh/hosts.yml` 和 `home/.config/gh/config.yml`，用于 worker
+  内执行 `gh pr create`。
+- `GH_TOKEN` 不作为 worker 认证方案；它在 Hermes terminal 环境中属于安全
+  blocklist，`terminal.env_passthrough` 不会让它进入子进程。
+
 已创建首批 role skills：
 
 - `~/.hermes/profiles/odoo-hedge-orchestrator/skills/dev/odoo-hedge-orchestrator/SKILL.md`

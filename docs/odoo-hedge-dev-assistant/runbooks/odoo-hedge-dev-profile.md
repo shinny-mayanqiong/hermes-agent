@@ -84,6 +84,103 @@ terminal:
 不要把业务用户使用的 `~/.hermes/skills/domain/odoo-hedge*` skills 直接作为
 开发 workflow 入口。开发人员 workflow 应独立建立。
 
+## profile 运行约定
+
+所有 `odoo-hedge-*` 开发 profiles 必须保持以下约定。新增 profile 后，
+需要按同样方式补齐。
+
+### 工作目录
+
+`config.yaml` 中必须设置：
+
+```yaml
+terminal:
+  cwd: /home/user/Repos/odoo-hedge
+```
+
+### Git commit 作者
+
+Hermes worker 使用每个 profile 的隔离 HOME：
+
+```text
+~/.hermes/profiles/<profile>/home/
+```
+
+因此 git commit 作者应写入对应 profile 的 `home/.gitconfig`，不要依赖
+用户主目录的 `~/.gitconfig`。
+
+当前统一身份：
+
+```text
+Hermes Hedge Agent <hermes-hedge-agent@users.noreply.github.com>
+```
+
+设置命令模板：
+
+```bash
+profile=odoo-hedge-coder
+home="/home/user/.hermes/profiles/$profile/home"
+
+mkdir -p "$home"
+git config --file "$home/.gitconfig" user.name "Hermes Hedge Agent"
+git config --file "$home/.gitconfig" user.email "hermes-hedge-agent@users.noreply.github.com"
+chmod 700 "$home"
+chmod 600 "$home/.gitconfig"
+```
+
+### GitHub CLI 登录
+
+Hermes worker 的 `gh` 也读取 profile 隔离 HOME 下的配置：
+
+```text
+~/.hermes/profiles/<profile>/home/.config/gh/hosts.yml
+~/.hermes/profiles/<profile>/home/.config/gh/config.yml
+```
+
+如果要让 worker 能创建 PR，需要给每个相关 profile 安装 GitHub CLI 登录
+配置。当前做法是把用户已登录的 `gh` 配置复制到 profile 隔离 HOME。
+
+```bash
+profile=odoo-hedge-coder
+gh_dir="/home/user/.hermes/profiles/$profile/home/.config/gh"
+
+mkdir -p "$gh_dir"
+install -m 600 /home/user/.config/gh/hosts.yml "$gh_dir/hosts.yml"
+install -m 600 /home/user/.config/gh/config.yml "$gh_dir/config.yml"
+chmod 700 "/home/user/.hermes/profiles/$profile/home"
+chmod 700 "/home/user/.hermes/profiles/$profile/home/.config"
+chmod 710 "$gh_dir"
+```
+
+注意：`GH_TOKEN` 在 Hermes terminal 子进程环境中属于安全 blocklist，
+即使写入 `terminal.env_passthrough` 也不会透传。不要把 `GH_TOKEN`
+passthrough 当成 GitHub CLI 认证方案。
+
+### PR 创建者
+
+commit 作者由 `.gitconfig` 决定；PR 页面显示的 `opened by` 由 `gh auth`
+登录账号决定。当前 PR 仍会显示为当前 `gh` 登录账号创建。若未来需要 PR
+显示独立账号，需要使用 GitHub machine user / bot account，并把该账号的
+`gh` 登录配置安装到各 profile 的隔离 HOME。
+
+### 验证
+
+对任一 profile，可用以下命令让 Hermes worker 自检：
+
+```bash
+cd /home/user/Repos/hermes-agent
+source .venv/bin/activate
+
+hermes -p odoo-hedge-coder chat -Q -q \
+  "只运行并汇报：git config --global --get user.name; git config --global --get user.email; gh auth status"
+```
+
+预期：
+
+- git user name 为 `Hermes Hedge Agent`。
+- git user email 为 `hermes-hedge-agent@users.noreply.github.com`。
+- `gh auth status` 显示已登录。
+
 ## 使用方式
 
 如果 alias 在 PATH 中可用：
