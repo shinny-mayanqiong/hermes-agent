@@ -5,6 +5,17 @@
 `odoo-hedge-workflow` 是 `odoo-hedge` 开发专用 Hermes plugin command，
 用于创建和推进 dynamic DAG workflow。
 
+当前 plugin 实现仍是 V1 phase map。后续目标流程以
+`../plans/2026-06-18-skill-based-delivery-workflow-v2.md` 为准：
+
+```text
+spec discussion -> spec freeze -> blueprint -> spec/blueprint review
+-> implementation -> CI -> local code review -> PR comments -> closeout
+```
+
+本 runbook 记录当前命令的实际行为；当 plugin 迁移到 V2 后，应同步更新
+`start` 的第一阶段和 `tick` 状态机。
+
 该 plugin 位于 Hermes 仓库：
 
 ```text

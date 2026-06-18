@@ -42,16 +42,25 @@ The goal is to build an incremental, maintainable setup where Hermes can support
 
 ## Current Workflow Entry
 
-当前 delivery workflow 入口：
+当前已确认的目标 delivery workflow：
 
-- `plans/2026-06-04-delivery-workflow-v1.md`
+- `plans/2026-06-18-skill-based-delivery-workflow-v2.md`
 
 用户提供已有 GitHub issue 后，默认创建一个 Kanban root delivery task，由
-`odoo-hedge-orchestrator` 从 `Bootstrap Worktree` 开始编排 worktree、plan、
-implementation、review、QA、PR、CI、PR comments 和 closeout。
+`odoo-hedge-orchestrator` 先解析或创建 issue worktree，再按 skill-based
+workflow 编排：
+
+```text
+spec discussion -> spec freeze -> blueprint -> spec/blueprint review
+-> implementation -> CI -> local code review -> PR comments -> closeout
+```
 
 如果没有 issue，流程先阻塞，等待用户确认是否创建 issue；创建 issue 不属于
 默认 delivery graph。
+
+当前 `odoo-hedge-workflow` plugin 仍处于 V1 实现，runbook 见：
+
+- `runbooks/odoo-hedge-workflow-plugin.md`
 
 查看过程：
 

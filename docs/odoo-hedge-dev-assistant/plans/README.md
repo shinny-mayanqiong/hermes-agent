@@ -63,3 +63,7 @@ YYYY-MM-DD-short-topic.md
   多角色流程的问题。
 - `2026-06-18-dynamic-dag-workflow-v1.md` - 定义动态 DAG workflow、
   orchestrator tick、阶段状态机和 worker role policy。
+- `2026-06-18-skill-based-delivery-workflow-v2.md` - 确定后续目标流程：
+  spec discussion / spec freeze / blueprint / 文档 review / implementation /
+  CI / 本地 code review / PR comments / closeout，并映射到 profiles 和
+  repo-local Codex skills。
