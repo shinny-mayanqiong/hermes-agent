@@ -56,3 +56,10 @@ codex-runtime-check.md
 - Slack gateway 启动与状态检查
 - `odoo-hedge` profile 切换与验证
 - provider / model 切换与验证
+
+## 当前 runbooks
+
+- `odoo-hedge-dev-profile.md` - profile 配置、隔离 HOME、GitHub CLI 和
+  commit 身份约定。
+- `odoo-hedge-workflow-plugin.md` - `odoo-hedge-workflow` plugin 的
+  `start` / `tick` / `status` 使用方式。

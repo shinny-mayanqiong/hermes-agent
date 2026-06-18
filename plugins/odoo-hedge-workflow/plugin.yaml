@@ -1,0 +1,5 @@
+name: odoo-hedge-workflow
+version: "0.1.0"
+description: "Drive Odoo Hedge dynamic DAG workflows."
+author: "Hermes Agent"
+kind: standalone

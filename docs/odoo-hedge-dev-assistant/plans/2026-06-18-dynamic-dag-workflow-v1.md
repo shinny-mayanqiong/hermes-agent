@@ -586,7 +586,7 @@ odoo-hedge-orchestrator
 创建 project-specific Hermes plugin：
 
 ```text
-~/.hermes/plugins/odoo-hedge-workflow/
+plugins/odoo-hedge-workflow/
 ```
 
 plugin 注册 CLI command：
@@ -604,7 +604,7 @@ hermes odoo-hedge-workflow status ...
 实现可测试的 Python module：
 
 ```text
-~/.hermes/plugins/odoo-hedge-workflow/workflow.py
+plugins/odoo-hedge-workflow/workflow.py
 ```
 
 职责：
