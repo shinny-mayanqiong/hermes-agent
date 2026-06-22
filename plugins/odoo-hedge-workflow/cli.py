@@ -31,12 +31,48 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         help="Fail instead of creating a worktree when no matching worktree exists",
     )
     p_start.add_argument("--json", action="store_true", help="Emit JSON")
+    p_start.add_argument("--auto", action="store_true", help="Run the auto controller after start")
+    p_start.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=workflow.AUTO_DEFAULT_POLL_SECONDS,
+        help="Seconds between auto-controller wait polls. Defaults to 30.",
+    )
+    p_start.add_argument(
+        "--max-steps",
+        type=int,
+        default=workflow.AUTO_DEFAULT_MAX_STEPS,
+        help="Maximum auto-controller steps before timing out.",
+    )
+    p_start.add_argument("--notify-platform", default=None, help="Notification platform, e.g. slack")
+    p_start.add_argument("--notify-chat-id", default=None, help="Notification chat/channel id")
+    p_start.add_argument("--notify-thread-id", default=None, help="Notification thread id/ts")
+    p_start.add_argument("--notify-user-id", default=None, help="Notification user id")
+    p_start.add_argument("--notifier-profile", default=None, help="Gateway profile that owns notifications")
 
     p_tick = sub.add_parser("tick", help="Advance a workflow one controller step")
     p_tick.add_argument("root_task_id", help="Workflow root task id")
     mode = p_tick.add_mutually_exclusive_group()
     mode.add_argument("--plan", action="store_true", help="Only print the planned next action")
     mode.add_argument("--apply", action="store_true", help="Create the planned next task")
+    mode.add_argument("--auto", action="store_true", help="Run the auto controller until pause/completion")
+    p_tick.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=workflow.AUTO_DEFAULT_POLL_SECONDS,
+        help="Seconds between auto-controller wait polls. Defaults to 30.",
+    )
+    p_tick.add_argument(
+        "--max-steps",
+        type=int,
+        default=workflow.AUTO_DEFAULT_MAX_STEPS,
+        help="Maximum auto-controller steps before timing out.",
+    )
+    p_tick.add_argument("--notify-platform", default=None, help="Notification platform, e.g. slack")
+    p_tick.add_argument("--notify-chat-id", default=None, help="Notification chat/channel id")
+    p_tick.add_argument("--notify-thread-id", default=None, help="Notification thread id/ts")
+    p_tick.add_argument("--notify-user-id", default=None, help="Notification user id")
+    p_tick.add_argument("--notifier-profile", default=None, help="Gateway profile that owns notifications")
     p_tick.add_argument("--json", action="store_true", help="Emit JSON")
 
     p_status = sub.add_parser("status", help="Show workflow status")
@@ -75,6 +111,18 @@ def _print_result(result: dict, *, as_json: bool) -> None:
         print(f"Topic:         {result.get('topic') or '(none)'}")
         print(f"Worktree:      {result.get('worktree') or '(unknown)'}")
         print(f"Worktree mode: {result.get('worktree_source') or '(unknown)'}")
+        if result.get("notification_target"):
+            target = result["notification_target"]
+            print(
+                "Notify:       "
+                f"{target.get('platform')}:{target.get('chat_id')}"
+                + (f":{target.get('thread_id')}" if target.get("thread_id") else "")
+            )
+        return
+    if kind == "auto_start":
+        _print_result(result["start"], as_json=False)
+        print("")
+        _print_result(result["auto"], as_json=False)
         return
     if kind == "tick":
         print(f"Action: {result['action']}")
@@ -86,6 +134,28 @@ def _print_result(result: dict, *, as_json: bool) -> None:
             print(f"Next phase: {result['next_phase']}")
         if result.get("created_task_id"):
             print(f"Created task: {result['created_task_id']}")
+        return
+    if kind == "auto":
+        print(f"Auto outcome: {result['outcome']}")
+        print(f"Root:         {result['root_task_id']}")
+        print(f"Board:        {result['board']}")
+        print(f"Steps:        {result['steps']}")
+        if result.get("reason"):
+            print(f"Reason:       {result['reason']}")
+        if result.get("actions"):
+            last = result["actions"][-1]
+            print(f"Last action:  {last.get('action')}")
+            if last.get("created_task_id"):
+                print(f"Created task: {last['created_task_id']}")
+            if last.get("next_phase"):
+                print(f"Next phase:   {last['next_phase']}")
+        if result.get("notification_target"):
+            target = result["notification_target"]
+            print(
+                "Notify:       "
+                f"{target.get('platform')}:{target.get('chat_id')}"
+                + (f":{target.get('thread_id')}" if target.get("thread_id") else "")
+            )
         return
     if kind == "status":
         print(f"Root:    {result['root_task_id']} ({result['root_status']})")
@@ -128,10 +198,39 @@ def odoo_hedge_workflow_command(args: argparse.Namespace) -> int:
                 topic=args.topic,
                 create_worktree=not args.no_create_worktree,
                 title=args.title,
+                notify_platform=args.notify_platform,
+                notify_chat_id=args.notify_chat_id,
+                notify_thread_id=args.notify_thread_id,
+                notify_user_id=args.notify_user_id,
+                notifier_profile=args.notifier_profile,
             )
+            if args.auto:
+                auto_result = workflow.run_auto_workflow(
+                    root_task_id=result["root_task_id"],
+                    board=args.board,
+                    poll_seconds=args.poll_seconds,
+                    max_steps=args.max_steps,
+                )
+                result = {"kind": "auto_start", "start": result, "auto": auto_result}
             _print_result(result, as_json=args.json)
+            if args.auto and result["auto"].get("outcome") == "timeout":
+                return 1
             return 0
         if command == "tick":
+            if args.auto:
+                result = workflow.run_auto_workflow(
+                    root_task_id=args.root_task_id,
+                    board=args.board,
+                    poll_seconds=args.poll_seconds,
+                    max_steps=args.max_steps,
+                    notify_platform=args.notify_platform,
+                    notify_chat_id=args.notify_chat_id,
+                    notify_thread_id=args.notify_thread_id,
+                    notify_user_id=args.notify_user_id,
+                    notifier_profile=args.notifier_profile,
+                )
+                _print_result(result, as_json=args.json)
+                return 1 if result.get("outcome") == "timeout" else 0
             result = workflow.tick_workflow(
                 root_task_id=args.root_task_id,
                 board=args.board,

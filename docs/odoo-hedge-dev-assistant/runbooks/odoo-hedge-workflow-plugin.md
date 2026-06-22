@@ -41,8 +41,10 @@ plugins/odoo-hedge-workflow/
 
 ```bash
 hermes -p odoo-hedge-orchestrator odoo-hedge-workflow start --issue 955
+hermes -p odoo-hedge-orchestrator odoo-hedge-workflow start --issue 955 --auto
 hermes -p odoo-hedge-orchestrator odoo-hedge-workflow tick <root_task_id> --plan
 hermes -p odoo-hedge-orchestrator odoo-hedge-workflow tick <root_task_id> --apply
+hermes -p odoo-hedge-orchestrator odoo-hedge-workflow tick <root_task_id> --auto
 hermes -p odoo-hedge-orchestrator odoo-hedge-workflow status <root_task_id>
 ```
 
@@ -138,6 +140,12 @@ task metadata 会记录 branch、worktree、`ODOO_DB_NAME`、test DB、
 
 `tick --apply` 创建下一阶段 child task，并写 root comment。
 
+`tick --auto` 是 controller loop：循环执行 `tick --apply`，能自动判断的阶段
+自动衔接；遇到需要人工判断的状态时暂停 root task 并通知。
+
+`start --auto` 等价于先 `start` 创建 root / first child，再对 root 执行
+`tick --auto`。
+
 review gate 的 task result 必须包含结构化布尔字段：
 
 - `spec_blueprint_review`：`"approved": true/false`
@@ -200,6 +208,57 @@ requires_i18n=true -> i18n_check -> ci_watch_repair
 needs_followup_issue=true -> project_followup -> return_phase 或 implementation
 needs_user_input=true -> 不创建下一阶段，等待用户输入
 ```
+
+## `--auto` 与通知
+
+`--auto` 不替代 Kanban dispatcher。Kanban dispatcher 仍负责把 `ready` child
+task 分配给对应 profile worker；`--auto` 只负责读取 child task 的结果并决定
+是否创建下一阶段 child task、暂停或完成 root workflow。
+
+默认行为：
+
+- child 仍在 `todo` / `ready` / `running` / `review`：等待。
+- child `done` 且结果足以判断：自动创建下一阶段 child task。
+- child `blocked`：暂停 root task，写 root comment，并产生 root `blocked` event。
+- 结果缺少必要字段，例如 `approved=true/false`、`success=true/false`、
+  `comments_resolved=true/false`：暂停 root task，等待人工补充或判断。
+- `closeout_sync` 完成且结果 schema 完整：root task 标记为 `done`。
+
+Dashboard / Kanban 查看方式：
+
+- root task：查看整个 issue workflow 的总时间线、自动推进记录、暂停原因和最终结果。
+- child task：查看某个阶段的 worker 输出、result JSON、worker log 和 artifacts。
+
+Slack 通知复用 Kanban notifier，只推送 root task 的 terminal events：
+
+- 暂停时推送 root `blocked`。
+- 完成时推送 root `completed`。
+- 普通 phase transition 默认只写 root comment，不推 Slack，避免刷屏。
+
+如果需要 Slack 通知同一个 issue 始终在同一个 thread，启动时传入 root
+notification target：
+
+```bash
+hermes -p odoo-hedge-orchestrator odoo-hedge-workflow start \
+  --issue 955 \
+  --auto \
+  --notify-platform slack \
+  --notify-chat-id <slack_channel_id> \
+  --notify-thread-id <thread_ts>
+```
+
+也可以对已有 root 追加并继续自动推进：
+
+```bash
+hermes -p odoo-hedge-orchestrator odoo-hedge-workflow tick <root_task_id> \
+  --auto \
+  --notify-platform slack \
+  --notify-chat-id <slack_channel_id> \
+  --notify-thread-id <thread_ts>
+```
+
+notification subscription 只挂在 root task 上，不挂在每个 child task 上。
+同一个 root task 的后续暂停和完成通知会复用同一个 `thread_id`。
 
 ## execution backend
 

@@ -18,6 +18,8 @@ from hermes_cli import kanban_db as kb
 
 WORKFLOW_TYPE = "odoo_hedge_dynamic_delivery_v1"
 WORKFLOW_PLUGIN_AUTHOR = "odoo-hedge-workflow"
+AUTO_DEFAULT_POLL_SECONDS = 30.0
+AUTO_DEFAULT_MAX_STEPS = 1000
 PR_REVIEW_DEFAULT_REPO = "/home/user/Repos/odoo-hedge"
 PR_REVIEW_DEFAULT_BOARD = "odoo-hedge-dev"
 PR_REVIEW_DEFAULT_REPO_SLUG = "shinnytech/odoo-hedge"
@@ -1172,6 +1174,101 @@ def _refresh_task_workspace(
             )
 
 
+def _add_root_notification_subscription(
+    conn,
+    root_task_id: str,
+    *,
+    platform: str | None = None,
+    chat_id: str | None = None,
+    thread_id: str | None = None,
+    user_id: str | None = None,
+    notifier_profile: str | None = None,
+    skip_existing_events: bool = True,
+) -> dict[str, str] | None:
+    platform_value = (platform or "").strip().lower()
+    chat_value = (chat_id or "").strip()
+    if not platform_value and not chat_value:
+        return None
+    if not platform_value or not chat_value:
+        raise ValueError("--notify-platform and --notify-chat-id must be provided together")
+
+    thread_value = (thread_id or "").strip()
+    user_value = (user_id or "").strip()
+    notifier_value = (notifier_profile or "").strip()
+    existing = conn.execute(
+        """
+        SELECT 1 FROM kanban_notify_subs
+         WHERE task_id = ?
+           AND platform = ?
+           AND chat_id = ?
+           AND thread_id = ?
+         LIMIT 1
+        """,
+        (root_task_id, platform_value, chat_value, thread_value),
+    ).fetchone()
+    kb.add_notify_sub(
+        conn,
+        task_id=root_task_id,
+        platform=platform_value,
+        chat_id=chat_value,
+        thread_id=thread_value or None,
+        user_id=user_value or None,
+        notifier_profile=notifier_value or None,
+    )
+    target = {
+        "platform": platform_value,
+        "chat_id": chat_value,
+        "thread_id": thread_value,
+        "user_id": user_value,
+        "notifier_profile": notifier_value,
+    }
+    if existing is None:
+        kb.add_comment(
+            conn,
+            root_task_id,
+            WORKFLOW_PLUGIN_AUTHOR,
+            "\n".join(
+                [
+                    "workflow_notification_target: true",
+                    f"platform: {platform_value}",
+                    f"chat_id: {chat_value}",
+                    f"thread_id: {thread_value}",
+                    f"user_id: {user_value}",
+                    f"notifier_profile: {notifier_value}",
+                ]
+            ),
+        )
+    if skip_existing_events and existing is None:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) AS max_id FROM task_events WHERE task_id = ?",
+            (root_task_id,),
+        ).fetchone()
+        cursor = int(row["max_id"] if row else 0)
+        with kb.write_txn(conn):
+            conn.execute(
+                """
+                UPDATE kanban_notify_subs
+                   SET last_event_id = CASE
+                       WHEN last_event_id < ? THEN ?
+                       ELSE last_event_id
+                   END
+                 WHERE task_id = ?
+                   AND platform = ?
+                   AND chat_id = ?
+                   AND thread_id = ?
+                """,
+                (
+                    cursor,
+                    cursor,
+                    root_task_id,
+                    platform_value,
+                    chat_value,
+                    thread_value,
+                ),
+            )
+    return target
+
+
 def start_workflow(
     *,
     issue: int,
@@ -1183,6 +1280,11 @@ def start_workflow(
     topic: str | None = None,
     create_worktree: bool = True,
     title: str | None = None,
+    notify_platform: str | None = None,
+    notify_chat_id: str | None = None,
+    notify_thread_id: str | None = None,
+    notify_user_id: str | None = None,
+    notifier_profile: str | None = None,
 ) -> dict[str, Any]:
     resolved = _resolve_worktree(
         issue=issue,
@@ -1254,6 +1356,15 @@ def start_workflow(
                 ]
             ),
         )
+        notification_target = _add_root_notification_subscription(
+            conn,
+            root_id,
+            platform=notify_platform,
+            chat_id=notify_chat_id,
+            thread_id=notify_thread_id,
+            user_id=notify_user_id,
+            notifier_profile=notifier_profile,
+        )
     return {
         "kind": "start",
         "board": board,
@@ -1266,6 +1377,7 @@ def start_workflow(
         "worktree": resolved.worktree,
         "worktree_source": resolved.source,
         "worktree_resources": resolved.resources,
+        "notification_target": notification_target,
     }
 
 
@@ -1746,6 +1858,325 @@ def workflow_status(root_task_id: str, *, board: str) -> dict[str, Any]:
         "children": child_rows,
         "processed_child_tasks": sorted(processed),
         "next_action": next_action,
+    }
+
+
+def _root_event(conn, task_id: str, kind: str, payload: dict[str, Any] | None = None) -> None:
+    conn.execute(
+        "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, strftime('%s','now'))",
+        (
+            task_id,
+            kind,
+            json.dumps(payload, ensure_ascii=False) if payload else None,
+        ),
+    )
+
+
+def _pause_workflow_root(
+    root_task_id: str,
+    *,
+    board: str,
+    reason: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    summary = f"Workflow paused: {reason}"
+    payload = {
+        "source": WORKFLOW_PLUGIN_AUTHOR,
+        "reason": reason,
+        "details": details or {},
+    }
+    with kb.connect_closing(board=board) as conn:
+        root = _load_task(conn, root_task_id)
+        root_meta = _validate_root(root)
+        _update_root_progress(
+            conn,
+            root_task_id,
+            root_meta,
+            current_phase=root_meta.get("current_phase") or "unknown",
+            iteration=int(root_meta.get("iteration") or 1),
+            status="paused",
+        )
+        kb.add_comment(
+            conn,
+            root_task_id,
+            WORKFLOW_PLUGIN_AUTHOR,
+            "\n".join(
+                [
+                    "workflow_auto_paused: true",
+                    f"reason: {reason}",
+                    "details:",
+                    _json_block(details or {}),
+                ]
+            ),
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                """
+                UPDATE tasks
+                   SET status = 'blocked',
+                       result = ?,
+                       claim_lock = NULL,
+                       claim_expires = NULL,
+                       worker_pid = NULL
+                 WHERE id = ?
+                   AND status NOT IN ('done', 'archived')
+                """,
+                (summary, root_task_id),
+            )
+            _root_event(conn, root_task_id, "blocked", payload)
+    return {"root_status": "blocked", "notified": True, "summary": summary}
+
+
+def _complete_workflow_root(
+    root_task_id: str,
+    *,
+    board: str,
+    reason: str,
+    actions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    summary = f"Workflow completed: {reason}"
+    metadata = {
+        "workflow_type": WORKFLOW_TYPE,
+        "source": WORKFLOW_PLUGIN_AUTHOR,
+        "outcome": "completed",
+        "reason": reason,
+        "auto_controller": True,
+        "steps": len(actions),
+    }
+    with kb.connect_closing(board=board) as conn:
+        root = _load_task(conn, root_task_id)
+        root_meta = _validate_root(root)
+        _update_root_progress(
+            conn,
+            root_task_id,
+            root_meta,
+            current_phase=root_meta.get("current_phase") or "closeout_sync",
+            iteration=int(root_meta.get("iteration") or 1),
+            status="completed",
+        )
+        kb.add_comment(
+            conn,
+            root_task_id,
+            WORKFLOW_PLUGIN_AUTHOR,
+            "\n".join(
+                [
+                    "workflow_auto_completed: true",
+                    f"reason: {reason}",
+                    f"steps: {len(actions)}",
+                ]
+            ),
+        )
+        completed = kb.complete_task(
+            conn,
+            root_task_id,
+            result=summary,
+            summary=summary,
+            metadata=metadata,
+        )
+    return {"root_status": "done" if completed else "unchanged", "notified": completed, "summary": summary}
+
+
+def _wait_pause_details(root_task_id: str, *, board: str) -> dict[str, Any] | None:
+    status = workflow_status(root_task_id, board=board)
+    active = [
+        child for child in status.get("children") or []
+        if child.get("status") in {"ready", "todo", "running", "blocked", "review"}
+    ]
+    blocked = [child for child in active if child.get("status") == "blocked"]
+    if blocked:
+        return {
+            "reason": f"active child {blocked[0]['id']} is blocked",
+            "active_children": active,
+            "blocked_children": blocked,
+        }
+    if not active:
+        return {
+            "reason": "workflow has no active child task and no completed unprocessed child",
+            "active_children": active,
+        }
+    return None
+
+
+def _is_workflow_complete_reason(reason: str | None) -> bool:
+    return "closeout completed" in (reason or "").casefold()
+
+
+def _is_manual_judgement_reason(reason: str | None) -> bool:
+    lowered = (reason or "").casefold()
+    return (
+        "missing" in lowered
+        or "needs user input" in lowered
+        or "unsupported child phase" in lowered
+    )
+
+
+def run_auto_workflow(
+    *,
+    root_task_id: str,
+    board: str,
+    poll_seconds: float = AUTO_DEFAULT_POLL_SECONDS,
+    max_steps: int = AUTO_DEFAULT_MAX_STEPS,
+    notify_platform: str | None = None,
+    notify_chat_id: str | None = None,
+    notify_thread_id: str | None = None,
+    notify_user_id: str | None = None,
+    notifier_profile: str | None = None,
+) -> dict[str, Any]:
+    if max_steps <= 0:
+        raise ValueError("max_steps must be positive")
+    if poll_seconds < 0:
+        raise ValueError("poll_seconds must be >= 0")
+
+    with kb.connect_closing(board=board) as conn:
+        root = _load_task(conn, root_task_id)
+        _validate_root(root)
+        notification_target = _add_root_notification_subscription(
+            conn,
+            root_task_id,
+            platform=notify_platform,
+            chat_id=notify_chat_id,
+            thread_id=notify_thread_id,
+            user_id=notify_user_id,
+            notifier_profile=notifier_profile,
+        )
+        kb.add_comment(
+            conn,
+            root_task_id,
+            WORKFLOW_PLUGIN_AUTHOR,
+            "\n".join(
+                [
+                    "workflow_auto_started: true",
+                    f"poll_seconds: {poll_seconds}",
+                    f"max_steps: {max_steps}",
+                ]
+            ),
+        )
+
+    actions: list[dict[str, Any]] = []
+    for step in range(1, max_steps + 1):
+        result = tick_workflow(root_task_id=root_task_id, board=board, apply=True)
+        action_record = {
+            "step": step,
+            "action": result.get("action"),
+            "reason": result.get("reason"),
+            "processed_child_task": result.get("processed_child_task"),
+            "unprocessed_child_task": result.get("unprocessed_child_task"),
+            "next_phase": result.get("next_phase"),
+            "created_task_id": result.get("created_task_id"),
+            "active_children": result.get("active_children") or [],
+        }
+        actions.append(action_record)
+
+        if result.get("action") == "create_next_task":
+            continue
+
+        if result.get("action") == "wait":
+            pause_details = _wait_pause_details(root_task_id, board=board)
+            if pause_details:
+                pause = _pause_workflow_root(
+                    root_task_id,
+                    board=board,
+                    reason=pause_details["reason"],
+                    details=pause_details,
+                )
+                return {
+                    "kind": "auto",
+                    "board": board,
+                    "root_task_id": root_task_id,
+                    "outcome": "paused",
+                    "reason": pause_details["reason"],
+                    "steps": step,
+                    "actions": actions,
+                    "notification_target": notification_target,
+                    "root_update": pause,
+                }
+            if poll_seconds:
+                time.sleep(poll_seconds)
+            continue
+
+        if result.get("action") == "no_next_task":
+            reason = str(result.get("reason") or "")
+            if _is_workflow_complete_reason(reason):
+                complete = _complete_workflow_root(
+                    root_task_id,
+                    board=board,
+                    reason=reason,
+                    actions=actions,
+                )
+                return {
+                    "kind": "auto",
+                    "board": board,
+                    "root_task_id": root_task_id,
+                    "outcome": "completed",
+                    "reason": reason,
+                    "steps": step,
+                    "actions": actions,
+                    "notification_target": notification_target,
+                    "root_update": complete,
+                }
+            if result.get("unprocessed_child_task") or _is_manual_judgement_reason(reason):
+                pause = _pause_workflow_root(
+                    root_task_id,
+                    board=board,
+                    reason=reason or "workflow needs manual judgement",
+                    details=result,
+                )
+                return {
+                    "kind": "auto",
+                    "board": board,
+                    "root_task_id": root_task_id,
+                    "outcome": "paused",
+                    "reason": reason,
+                    "steps": step,
+                    "actions": actions,
+                    "notification_target": notification_target,
+                    "root_update": pause,
+                }
+            pause = _pause_workflow_root(
+                root_task_id,
+                board=board,
+                reason=reason or "workflow has no next task",
+                details=result,
+            )
+            return {
+                "kind": "auto",
+                "board": board,
+                "root_task_id": root_task_id,
+                "outcome": "paused",
+                "reason": reason,
+                "steps": step,
+                "actions": actions,
+                "notification_target": notification_target,
+                "root_update": pause,
+            }
+
+        pause = _pause_workflow_root(
+            root_task_id,
+            board=board,
+            reason=f"unexpected tick action {result.get('action')!r}",
+            details=result,
+        )
+        return {
+            "kind": "auto",
+            "board": board,
+            "root_task_id": root_task_id,
+            "outcome": "paused",
+            "reason": f"unexpected tick action {result.get('action')!r}",
+            "steps": step,
+            "actions": actions,
+            "notification_target": notification_target,
+            "root_update": pause,
+        }
+
+    return {
+        "kind": "auto",
+        "board": board,
+        "root_task_id": root_task_id,
+        "outcome": "timeout",
+        "reason": f"auto controller reached max_steps={max_steps}",
+        "steps": max_steps,
+        "actions": actions,
+        "notification_target": notification_target,
     }
 
 
