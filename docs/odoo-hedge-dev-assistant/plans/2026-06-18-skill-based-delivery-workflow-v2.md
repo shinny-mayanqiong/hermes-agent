@@ -175,9 +175,11 @@ review 对象：
 
 必须检查：
 
-- scope 是否清楚。
-- acceptance criteria 是否可验证。
+- spec 是否清楚说明要解决的问题、目标用户/业务场景、范围、非范围、验收标准和风险边界。
+- UI/UX impact 是否明确：涉及哪些页面、菜单、按钮、表单字段、列表可见性、状态展示、提示文案或用户操作流；没有可见变化时是否明确写出无可见 UI/UX 变化。
+- acceptance criteria 是否可验证，是否足以判断需求已经完成。
 - Odoo model / security / migration / i18n / test 边界是否明确。
+- blueprint 的阶段划分、执行顺序、验证方式和回滚/异常处理是否合理。
 - blueprint 是否足够让 coder 直接执行。
 - 是否需要拆 follow-up issue。
 - 是否存在未解决的人类决策点。
@@ -211,13 +213,19 @@ review 对象：
 
 必须检查：
 
+- PR 解决了什么问题，以及通过哪些代码和测试改动解决。
+- UI/UX impact 是什么，是否已在 PR comment 中说明；没有可见变化时是否明确写出无可见 UI/UX 变化。
+- 需求本身是否合理，是否符合 issue/spec，是否出现应拆 follow-up issue 的范围扩张。
+- 实现方案是否合理，是否符合 `odoo-hedge` 的业务边界和 repo 约束。
 - 实现是否符合 spec。
 - 是否引入未声明的行为变化。
 - 测试是否覆盖核心 acceptance criteria。
-- Odoo ORM / security / migration / data / view 约束是否合理。
+- Odoo ORM / API / security / migration / data / view 约束是否合理。
+- 错误处理、事务/幂等、权限/状态机是否可靠。
 - 变量命名、业务命名、中文翻译是否符合项目习惯。
 - 是否需要 `translate-hedge-zh-cn`。
 - 是否需要拆 follow-up issue。
+- review 结论是否已经直接发送为 PR comment，comment 是否包含 UI/UX impact，并记录 `pr_comment_url`。
 
 不通过时回到：
 
@@ -358,11 +366,19 @@ orchestrator 读取 JSON 作为主接口。
   "workflow_id": "issue-955",
   "phase": "spec_blueprint_review",
   "iteration": 1,
+  "status": "done",
   "approved": false,
-  "blocking_comments": [
+  "review_decision": "changes_requested",
+  "review_summary": "spec 对 archived records 的验收边界不完整，blueprint 还不能直接进入实现。",
+  "ui_ux_impact": "该需求会改变期货账号删除后的列表可见性和再次启用路径，但 spec 未说明用户在账号列表、归档筛选和删除动作后的可见反馈。",
+  "clarity_findings": [
     "acceptance criteria do not specify expected behavior for archived records"
   ],
-  "non_blocking_comments": [],
+  "step_findings": [],
+  "blocking_findings": [
+    "acceptance criteria do not specify expected behavior for archived records"
+  ],
+  "non_blocking_findings": [],
   "return_phase": "spec_freeze",
   "next_recommended_phase": "spec_freeze"
 }
@@ -375,8 +391,15 @@ orchestrator 读取 JSON 作为主接口。
   "workflow_id": "issue-955",
   "phase": "spec_blueprint_review",
   "iteration": 1,
+  "status": "done",
   "approved": true,
-  "blocking_comments": [],
+  "review_decision": "approved",
+  "review_summary": "spec 和 blueprint 已足以指导实现。",
+  "ui_ux_impact": "删除动作会让期货账号从默认列表中隐藏；用户可通过 Odoo 归档记录入口查看，未新增按钮或页面。",
+  "clarity_findings": [],
+  "step_findings": [],
+  "blocking_findings": [],
+  "non_blocking_findings": [],
   "next_recommended_phase": "implementation"
 }
 ```
@@ -388,12 +411,18 @@ orchestrator 读取 JSON 作为主接口。
   "workflow_id": "issue-955",
   "phase": "local_code_review",
   "iteration": 1,
+  "status": "done",
   "approved": false,
-  "blocking_comments": [
+  "review_decision": "changes_requested",
+  "review_summary": "PR 覆盖了主要删除链路，但 callback cleanup 验收项仍缺失。",
+  "ui_ux_impact": "PR 会让删除后的期货账号从默认列表视图中隐藏，并在重新启用前保持 disabled 状态；当前 PR 说明未覆盖这一用户可见变化。",
+  "blocking_findings": [
     "implementation does not cover the spec acceptance criterion for callback cleanup"
   ],
+  "non_blocking_findings": [],
+  "pr_comment_url": "https://github.com/org/repo/pull/990#issuecomment-...",
   "requires_i18n": false,
-  "requires_followup_issue": false,
+  "needs_followup_issue": false,
   "next_recommended_phase": "implementation"
 }
 ```
@@ -405,8 +434,16 @@ orchestrator 读取 JSON 作为主接口。
   "workflow_id": "issue-955",
   "phase": "local_code_review",
   "iteration": 1,
+  "status": "done",
   "approved": true,
-  "blocking_comments": [],
+  "review_decision": "approved",
+  "review_summary": "PR 需求和实现方案合理，测试与 CI 证据充分。",
+  "ui_ux_impact": "删除期货账号后，账号从默认 active 列表隐藏；历史引用保持可读，未新增页面、按钮或可见文案。",
+  "blocking_findings": [],
+  "non_blocking_findings": [],
+  "pr_comment_url": "https://github.com/org/repo/pull/990#issuecomment-...",
+  "requires_i18n": false,
+  "needs_followup_issue": false,
   "next_recommended_phase": "pr_review_followup"
 }
 ```

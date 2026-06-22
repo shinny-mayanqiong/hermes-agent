@@ -91,14 +91,22 @@ PHASE_OUTPUT_EXTRAS = {
         "approved": True,
         "review_decision": "approved|changes_requested",
         "return_phase": "blueprint_prompts",
+        "review_summary": "",
+        "ui_ux_impact": "",
+        "clarity_findings": [],
+        "step_findings": [],
         "blocking_findings": [],
         "non_blocking_findings": [],
     },
     "local_code_review": {
         "approved": True,
         "review_decision": "approved|changes_requested",
+        "review_summary": "",
+        "ui_ux_impact": "",
         "blocking_findings": [],
         "non_blocking_findings": [],
+        "pr_comment_url": "",
+        "artifacts": [],
         "requires_i18n": False,
         "needs_followup_issue": False,
     },
@@ -154,7 +162,7 @@ PHASE_ALLOWED_ACTIONS = {
     "implementation": ["edit_business_code", "edit_tests", "run_tests", "git_commit", "git_push", "create_pr"],
     "ci_watch_repair": ["watch_ci", "edit_tests", "edit_business_code", "git_commit", "git_push"],
     "branch_sync_repair": ["fetch_base_branch", "rebase_or_merge_base", "resolve_conflicts", "run_tests", "git_commit", "git_push"],
-    "local_code_review": ["read_diff", "read_spec", "write_review_summary"],
+    "local_code_review": ["read_diff", "read_spec", "read_pr", "write_review_summary", "post_pr_comment"],
     "pr_review_followup": ["read_pr_comments", "edit_business_code", "edit_tests", "git_commit", "git_push"],
     "closeout_sync": ["read_pr", "read_issue", "sync_closeout_artifacts"],
     "i18n_check": ["edit_translations", "run_i18n_checks", "git_commit"],
@@ -172,6 +180,17 @@ PHASE_FORBIDDEN_ACTIONS = {
 }
 
 PHASE_INSTRUCTIONS = {
+    "spec_blueprint_review": [
+        "本阶段是开发前文档 review，只审查 spec 和 blueprint 是否足以指导实现，不修改业务代码。",
+        "必须判断 spec 是否清楚描述了要解决的问题、目标用户/业务场景、范围、非范围、验收标准和风险边界。",
+        "必须判断 spec 或 blueprint 是否说明 UI/UX impact：涉及哪些页面、菜单、按钮、表单字段、状态展示、提示文案或用户操作流；如果没有可见变化，也必须明确写出无可见 UI/UX 变化。",
+        "必须判断 blueprint 的阶段划分、执行顺序、验证方式和回滚/异常处理是否合理，是否能支撑后续 implementation 阶段直接执行。",
+        "如果发现需求定义不清、步骤缺失、验收不可执行、实现顺序风险高或与 odoo-hedge repo 约束冲突，设置 approved=false，并在 blocking_findings 中给出必须修正的问题。",
+        "如果存在用户可见变化但 UI/UX impact 未说明或无法验证，设置 approved=false，除非能明确证明该遗漏不影响实现和验收。",
+        "如果只有不影响开发启动的优化建议，可以设置 approved=true，并把建议放入 non_blocking_findings。",
+        "review 结论必须包含 review_summary、ui_ux_impact、clarity_findings、step_findings、blocking_findings、non_blocking_findings、approved 和 review_decision。",
+        "approved=false 时必须设置 return_phase；如果是需求/spec 问题，return_phase=spec_freeze；如果是执行工件/步骤问题，return_phase=blueprint_prompts。",
+    ],
     "branch_sync_repair": [
         "本阶段目标是修复 PR branch 与 base branch 的可合并状态，不是普通 CI 观察。",
         "必须先读取 PR mergeable / mergeStateStatus；如果是 CONFLICTING、DIRTY、UNKNOWN 或 behind，必须 fetch base branch 并 rebase 或 merge base branch。",
@@ -179,6 +198,18 @@ PHASE_INSTRUCTIONS = {
         "完成后必须 push 当前 branch，并重新读取 PR mergeable / mergeStateStatus。",
         "最终 JSON 必须包含 success、synced、conflicts_resolved、mergeable、merge_state_status。",
         "如果未实际完成 branch sync，但仍需要重试本阶段，设置 success=false 和 retry_branch_sync=true。",
+    ],
+    "local_code_review": [
+        "本阶段是开发完成且 CI 通过后的本地 code review，不修改业务代码、不提交、不 push、不创建 PR。",
+        "必须先读取 PR、issue/spec、blueprint、CI 结果和当前 branch diff，明确这个 PR 解决了什么问题，以及通过哪些代码和测试改动解决。",
+        "必须分析需求本身是否合理：是否符合 issue/spec，是否边界清楚，是否存在应拆 follow-up issue 的范围扩张。",
+        "必须明确分析 UI/UX impact：哪些用户页面、菜单、按钮、表单字段、列表可见性、状态展示、提示文案或用户操作流发生变化；如果没有可见变化，也必须明确写出无可见 UI/UX 变化。",
+        "必须分析实现方案是否合理：业务逻辑、Odoo 模型/API 使用、权限/状态机、错误处理、事务/幂等、测试覆盖、翻译和命名是否与 odoo-hedge 约束一致。",
+        "必须给出明确 review 结论：approved=true/false 和 review_decision。存在会影响正确性、数据安全、可维护性或验收的阻塞问题时，approved=false。",
+        "必须把详细 review 结论和改进建议直接发送为 PR comment；comment 应包含问题背景、实现概述、UI/UX impact、review 结论、blocking findings、non-blocking findings 和建议的后续动作。",
+        "如果 PR body 或已有 comment 没有说明 UI/UX impact，本阶段必须在 PR comment 中补齐；如果用户可见变化缺少验证证据，应作为 blocking 或 non-blocking finding 明确列出。",
+        "最终 JSON 必须包含 review_summary、ui_ux_impact、blocking_findings、non_blocking_findings、approved、review_decision 和 pr_comment_url。",
+        "如果发现需要新增/修改可见 UI 文案，设置 requires_i18n=true；如果需要拆 follow-up issue，设置 needs_followup_issue=true。",
     ],
 }
 

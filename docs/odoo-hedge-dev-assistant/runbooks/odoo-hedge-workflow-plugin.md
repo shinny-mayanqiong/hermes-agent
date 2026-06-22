@@ -147,6 +147,22 @@ plugin 会兼容 `review_decision=approved_with_non_blocking_notes` 这类常见
 review 输出，但不能依赖 LLM 每次都严格遵守格式；缺少必需字段时，`tick`
 不会再把 child 标记为 processed，方便回填 result 后重新推进。
 
+review prompt 约束：
+
+- `spec_blueprint_review` 是开发前文档 review。它必须判断 spec 是否清楚描述
+  需求、范围、非范围、验收标准和风险边界；同时判断 blueprint 的阶段划分、
+  执行顺序、验证方式和异常处理是否足以支撑后续 implementation 直接执行。
+  如果涉及用户可见变化，还必须检查 UI/UX impact 是否写清楚；如果没有可见
+  UI/UX 变化，也必须明确说明。
+  如果需求定义不清、步骤缺失、验收不可执行或与 `odoo-hedge` repo 约束冲突，
+  必须 `approved=false`，并设置 `return_phase=spec_freeze` 或
+  `return_phase=blueprint_prompts`。
+- `local_code_review` 是开发完成且 CI 通过后的本地 code review。它必须说明
+  PR 解决了什么问题、通过哪些代码和测试改动解决；分析需求是否合理、实现方案
+  是否合理、UI/UX impact 是什么、是否可以 approve，并给出 blocking /
+  non-blocking 改进建议。review 结论必须直接发送为 PR comment，comment 中必须
+  包含 UI/UX impact，并在 result 中记录 `pr_comment_url`。
+
 ## V2 phase map
 
 主流程：
