@@ -162,6 +162,11 @@ review prompt 约束：
   是否合理、UI/UX impact 是什么、是否可以 approve，并给出 blocking /
   non-blocking 改进建议。review 结论必须直接发送为 PR comment，comment 中必须
   包含 UI/UX impact，并在 result 中记录 `pr_comment_url`。
+- `closeout_sync` 只同步 closeout evidence、issue、Project 8 和文档状态。
+  它禁止 merge PR、close PR 或 reopen PR。PR 未 merge 时不得 close issue，
+  不得把 Project 8 移动到 `Done`；只能保持/设置为 `In Review` 并记录 blockers。
+  PR 已 merge 且验收、风险/回滚、closeout 证据完整时，才可以关闭 issue 并把
+  Project 8 移动到 `Done`。
 
 ## V2 phase map
 

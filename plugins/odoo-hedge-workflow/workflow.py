@@ -116,7 +116,11 @@ PHASE_OUTPUT_EXTRAS = {
         "artifacts": [],
     },
     "closeout_sync": {
-        "closed": True,
+        "closeout_synced": True,
+        "pr_merged": False,
+        "issue_closed": False,
+        "project_status": "In Review|Done",
+        "closeout_summary": "",
         "artifacts": [],
         "blockers": [],
     },
@@ -175,7 +179,14 @@ PHASE_FORBIDDEN_ACTIONS = {
     "blueprint_prompts": ["edit_business_code", "git_commit", "git_push", "create_pr"],
     "spec_blueprint_review": ["edit_business_code", "git_commit", "git_push", "create_pr"],
     "local_code_review": ["edit_business_code", "git_commit", "git_push", "create_pr"],
-    "closeout_sync": ["edit_business_code"],
+    "closeout_sync": [
+        "edit_business_code",
+        "merge_pr",
+        "close_pr",
+        "reopen_pr",
+        "close_issue_before_pr_merged",
+        "move_project_done_before_pr_merged",
+    ],
     "project_followup": ["edit_business_code", "git_commit", "git_push"],
 }
 
@@ -210,6 +221,15 @@ PHASE_INSTRUCTIONS = {
         "如果 PR body 或已有 comment 没有说明 UI/UX impact，本阶段必须在 PR comment 中补齐；如果用户可见变化缺少验证证据，应作为 blocking 或 non-blocking finding 明确列出。",
         "最终 JSON 必须包含 review_summary、ui_ux_impact、blocking_findings、non_blocking_findings、approved、review_decision 和 pr_comment_url。",
         "如果发现需要新增/修改可见 UI 文案，设置 requires_i18n=true；如果需要拆 follow-up issue，设置 needs_followup_issue=true。",
+    ],
+    "closeout_sync": [
+        "本阶段只做 PR / issue / Project / hedge_docs 的 closeout evidence 和状态同步，不负责实现、修复、merge PR、close PR 或 reopen PR。",
+        "必须先读取 PR 当前事实：state、merged、mergedAt、base/head、CI/checks、review 状态，以及相关 issue 和 Project 8 状态。",
+        "禁止 merge PR；禁止 close PR；禁止 reopen PR。PR 是否合并只按 GitHub 当前事实记录到 pr_merged。",
+        "如果 PR 尚未 merge，不得 close issue，不得把 Project 8 移动到 Done；应保持或设置为 In Review，并在 blockers 中说明缺少 merge 事实。",
+        "如果 PR 已 merge，且验收命令、风险/回滚说明和 closeout 证据完整，可以按 issue-closeout-sync skill 同步 issue closeout、关闭 issue，并把 Project 8 移动到 Done。",
+        "如果验收证据不完整，即使 PR 已 merge，也不得强行标记 Done；应记录 blockers 和下一步人工动作。",
+        "最终 JSON 必须包含 closeout_synced、pr_merged、issue_closed、project_status、closeout_summary、artifacts、blockers。",
     ],
 }
 
@@ -1169,6 +1189,14 @@ def _next_from_child(child: kb.Task) -> tuple[str | None, int, str]:
     if phase == "project_followup":
         return result.get("return_phase") or "implementation", iteration, "follow-up issue sync completed"
     if phase == "closeout_sync":
+        missing: list[str] = []
+        for key in ("closeout_synced", "pr_merged", "issue_closed"):
+            if not isinstance(result.get(key), bool):
+                missing.append(f"{key}=true/false")
+        if not str(result.get("project_status") or "").strip():
+            missing.append("project_status")
+        if missing:
+            return None, iteration, "closeout_sync result missing " + ", ".join(missing)
         return None, iteration, "closeout completed"
     return None, iteration, f"unsupported child phase {phase!r}"
 

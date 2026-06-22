@@ -87,7 +87,7 @@ root workflow
 | `branch_sync_repair` | `odoo-hedge-ci` | `hedge-ci-watch-repair-loop` | PR mergeability、base branch、CI result | branch sync / rebase、conflict repair、push |
 | `local_code_review` | `odoo-hedge-code-reviewer` | code review prompt / repo rules | diff、spec、CI 结果 | approve / request changes |
 | `pr_review_followup` | `odoo-hedge-pr-reviewer` | `gh-pr-review-followup` | PR comments | comments 处理结果 |
-| `closeout_sync` | `odoo-hedge-closeout` | `issue-closeout-sync` | merged/ready PR、issue、Project | closeout report |
+| `closeout_sync` | `odoo-hedge-closeout` | `issue-closeout-sync` | PR / issue / Project facts、验收证据 | closeout report、issue / Project 状态判断 |
 
 ## Codex Exec Worker Backend
 
@@ -240,6 +240,25 @@ ci_watch_repair
 ```
 
 通过后才进入 `pr_review_followup`。
+
+### Closeout Sync
+
+`closeout_sync` 在 PR comments 已处理后执行，用于同步收口证据和状态事实。
+
+必须检查：
+
+- PR 当前是否已经 merge，记录 `pr_merged=true/false`，不得自行 merge PR。
+- 禁止 close PR 或 reopen PR。
+- PR 未 merge 时不得 close issue，不得把 Project 8 移动到 `Done`；应保持或设置为 `In Review`，并在 blockers 中说明缺少 merge 事实。
+- PR 已 merge 且验收命令、风险/回滚说明和 closeout 证据完整时，才可以关闭 issue 并把 Project 8 移动到 `Done`。
+- PR 已 merge 但验收或 closeout 证据不完整时，不得强行 `Done`，必须记录 blockers 和下一步人工动作。
+
+输出必须清楚区分：
+
+- `closeout_synced`：closeout evidence / docs / comments 是否已同步。
+- `pr_merged`：PR 是否已合并，这是读取 GitHub 的事实，不是本阶段执行的动作。
+- `issue_closed`：本阶段是否关闭 issue。
+- `project_status`：Project 8 最终状态，例如 `In Review` 或 `Done`。
 
 ## 条件分支
 
@@ -445,6 +464,52 @@ orchestrator 读取 JSON 作为主接口。
   "requires_i18n": false,
   "needs_followup_issue": false,
   "next_recommended_phase": "pr_review_followup"
+}
+```
+
+### `closeout_sync`
+
+PR 已 merge 且 closeout 证据完整时：
+
+```json
+{
+  "workflow_id": "issue-955",
+  "phase": "closeout_sync",
+  "iteration": 1,
+  "status": "done",
+  "closeout_synced": true,
+  "pr_merged": true,
+  "issue_closed": true,
+  "project_status": "Done",
+  "closeout_summary": "PR 已合并，验收命令通过，风险与回滚说明已记录，issue 和 Project 8 已完成收口。",
+  "artifacts": [
+    "hedge_docs/progress/2026-06-22-issue-955-closeout.md"
+  ],
+  "blockers": [],
+  "next_recommended_phase": "done"
+}
+```
+
+PR 尚未 merge 或证据不完整时：
+
+```json
+{
+  "workflow_id": "issue-955",
+  "phase": "closeout_sync",
+  "iteration": 1,
+  "status": "done",
+  "closeout_synced": true,
+  "pr_merged": false,
+  "issue_closed": false,
+  "project_status": "In Review",
+  "closeout_summary": "closeout 证据已同步，但 PR 尚未合并，不能关闭 issue 或移动 Project 8 到 Done。",
+  "artifacts": [
+    "hedge_docs/progress/2026-06-22-issue-955-closeout.md"
+  ],
+  "blockers": [
+    "PR is not merged yet"
+  ],
+  "next_recommended_phase": "blocked_for_user"
 }
 ```
 
