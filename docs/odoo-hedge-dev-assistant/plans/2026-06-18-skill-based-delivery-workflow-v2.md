@@ -84,6 +84,7 @@ root workflow
 | `spec_blueprint_review` | `odoo-hedge-spec-reviewer` | review prompt / repo rules | frozen spec、blueprint | approve / request changes |
 | `implementation` | `odoo-hedge-coder` | `hedge-issue-delivery-loop` | approved spec、blueprint、worktree | code changes、tests、commit、PR |
 | `ci_watch_repair` | `odoo-hedge-ci` | `hedge-ci-watch-repair-loop` | PR、CI runs | CI pass/fail、修复 commits |
+| `branch_sync_repair` | `odoo-hedge-ci` | `hedge-ci-watch-repair-loop` | PR mergeability、base branch、CI result | branch sync / rebase、conflict repair、push |
 | `local_code_review` | `odoo-hedge-code-reviewer` | code review prompt / repo rules | diff、spec、CI 结果 | approve / request changes |
 | `pr_review_followup` | `odoo-hedge-pr-reviewer` | `gh-pr-review-followup` | PR comments | comments 处理结果 |
 | `closeout_sync` | `odoo-hedge-closeout` | `issue-closeout-sync` | merged/ready PR、issue、Project | closeout report |
@@ -119,6 +120,7 @@ codex exec "
 
 - `implementation`
 - `ci_watch_repair`
+- `branch_sync_repair`
 - `local_code_review`
 - `pr_review_followup`
 - `closeout_sync`
@@ -297,8 +299,17 @@ implementation.done
 ci_watch_repair.success=false
   -> implementation
 
-ci_watch_repair.success=true
+ci_watch_repair.success=true and mergeable clean
   -> local_code_review
+
+ci_watch_repair.success=true and mergeable conflicting/dirty/unknown
+  -> branch_sync_repair
+
+branch_sync_repair.success=true
+  -> ci_watch_repair
+
+branch_sync_repair.success=false
+  -> implementation
 
 local_code_review.approved=false
   -> implementation

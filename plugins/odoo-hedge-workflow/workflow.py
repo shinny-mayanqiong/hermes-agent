@@ -37,6 +37,7 @@ PHASE_ASSIGNEE = {
     "spec_blueprint_review": SPEC_REVIEWER,
     "implementation": CODER,
     "ci_watch_repair": CI,
+    "branch_sync_repair": CI,
     "local_code_review": CODE_REVIEWER,
     "pr_review_followup": PR_REVIEWER,
     "closeout_sync": CLOSEOUT,
@@ -51,6 +52,7 @@ PHASE_SCHEMA = {
     "spec_blueprint_review": "spec_blueprint_review_v2",
     "implementation": "implementation_v2",
     "ci_watch_repair": "ci_watch_repair_v2",
+    "branch_sync_repair": "branch_sync_repair_v2",
     "local_code_review": "local_code_review_v2",
     "pr_review_followup": "pr_review_followup_v2",
     "closeout_sync": "closeout_sync_v2",
@@ -69,6 +71,16 @@ PHASE_OUTPUT_EXTRAS = {
     "ci_watch_repair": {
         "success": True,
         "ci_failed": False,
+        "mergeable": "MERGEABLE",
+        "merge_state_status": "CLEAN",
+        "artifacts": [],
+        "blockers": [],
+    },
+    "branch_sync_repair": {
+        "success": True,
+        "synced": True,
+        "conflicts_resolved": True,
+        "needs_user_input": False,
         "artifacts": [],
         "blockers": [],
     },
@@ -115,6 +127,7 @@ PHASE_SKILL = {
     "blueprint_prompts": "spec-blueprint-prompts",
     "implementation": "hedge-issue-delivery-loop",
     "ci_watch_repair": "hedge-ci-watch-repair-loop",
+    "branch_sync_repair": "hedge-ci-watch-repair-loop",
     "pr_review_followup": "gh-pr-review-followup",
     "closeout_sync": "issue-closeout-sync",
     "i18n_check": "translate-hedge-zh-cn",
@@ -124,6 +137,7 @@ PHASE_SKILL = {
 PHASE_EXECUTION_BACKEND = {
     "implementation": "codex_exec",
     "ci_watch_repair": "codex_exec",
+    "branch_sync_repair": "codex_exec",
     "local_code_review": "codex_exec",
     "pr_review_followup": "codex_exec",
     "closeout_sync": "codex_exec",
@@ -136,6 +150,7 @@ PHASE_ALLOWED_ACTIONS = {
     "spec_blueprint_review": ["read_spec", "read_blueprint", "write_review_summary"],
     "implementation": ["edit_business_code", "edit_tests", "run_tests", "git_commit", "git_push", "create_pr"],
     "ci_watch_repair": ["watch_ci", "edit_tests", "edit_business_code", "git_commit", "git_push"],
+    "branch_sync_repair": ["fetch_base_branch", "rebase_or_merge_base", "resolve_conflicts", "run_tests", "git_commit", "git_push"],
     "local_code_review": ["read_diff", "read_spec", "write_review_summary"],
     "pr_review_followup": ["read_pr_comments", "edit_business_code", "edit_tests", "git_commit", "git_push"],
     "closeout_sync": ["read_pr", "read_issue", "sync_closeout_artifacts"],
@@ -656,6 +671,7 @@ def _phase_prompt_artifacts(phase: str, issue: int | None) -> list[str]:
         "spec_blueprint_review": [f"{base}/spec.md", f"{base}/blueprint.md"],
         "implementation": [f"{base}/spec.md", f"{base}/blueprint.md"],
         "ci_watch_repair": [f"{base}/implementation-report.md"],
+        "branch_sync_repair": [f"{base}/implementation-report.md", f"{base}/ci-report.md"],
         "local_code_review": [f"{base}/spec.md", f"{base}/blueprint.md", f"{base}/ci-report.md"],
         "pr_review_followup": [f"{base}/local-code-review.md"],
         "closeout_sync": [f"{base}/pr-review-followup.md"],
@@ -1000,6 +1016,40 @@ def _should_process_no_next(reason: str) -> bool:
     return True
 
 
+def _needs_branch_sync(result: dict[str, Any]) -> bool:
+    recommended = str(result.get("next_recommended_phase") or "").strip().casefold()
+    if recommended in {"branch_sync_repair", "branch-sync-repair", "branch sync repair"}:
+        return True
+
+    mergeable = str(result.get("mergeable") or "").strip().casefold()
+    merge_state = str(result.get("merge_state_status") or result.get("mergeStateStatus") or "").strip().casefold()
+    if mergeable in {"conflicting", "unknown"}:
+        return True
+    if merge_state in {"dirty", "blocked", "unknown", "unstable", "behind"}:
+        return True
+
+    text_parts: list[str] = []
+    for key in ("blockers", "warnings", "notes", "summary"):
+        value = result.get(key)
+        if isinstance(value, list):
+            text_parts.extend(str(item) for item in value)
+        elif value:
+            text_parts.append(str(value))
+    text = "\n".join(text_parts).casefold()
+    return any(
+        token in text
+        for token in (
+            "mergeable=conflicting",
+            "mergestatestatus=dirty",
+            "merge state status=dirty",
+            "merge conflict",
+            "needs branch sync",
+            "branch sync",
+            "rebase",
+        )
+    )
+
+
 def _next_from_child(child: kb.Task) -> tuple[str | None, int, str]:
     meta = _task_meta(child)
     phase = meta.get("phase")
@@ -1032,11 +1082,19 @@ def _next_from_child(child: kb.Task) -> tuple[str | None, int, str]:
     if phase == "implementation":
         return "ci_watch_repair", iteration, "implementation is ready for CI"
     if phase == "ci_watch_repair":
+        if _needs_branch_sync(result):
+            return "branch_sync_repair", iteration, "CI passed but PR branch needs sync before review"
         if result.get("success") is True:
             return "local_code_review", iteration, "CI passed"
         if result.get("success") is False or result.get("ci_failed") is True:
             return "implementation", iteration + 1, "CI requested fixes"
         return None, iteration, "ci_watch_repair result missing success=true/false"
+    if phase == "branch_sync_repair":
+        if result.get("success") is True or result.get("synced") is True:
+            return "ci_watch_repair", iteration, "branch sync completed; rerun CI"
+        if result.get("success") is False or result.get("conflicts_resolved") is False:
+            return "implementation", iteration + 1, "branch sync needs implementation fixes"
+        return None, iteration, "branch_sync_repair result missing success=true/false"
     if phase == "local_code_review":
         approved = _normalized_approval(result, positive_next_phases={"pr_review_followup"})
         if approved is True:

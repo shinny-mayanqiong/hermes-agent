@@ -169,6 +169,9 @@ start
 ```text
 spec_blueprint_review approved=false -> spec_freeze 或 blueprint_prompts
 ci_watch_repair success=false -> implementation
+ci_watch_repair success=true 且 mergeable=CONFLICTING/DIRTY/UNKNOWN -> branch_sync_repair
+branch_sync_repair success=true -> ci_watch_repair
+branch_sync_repair success=false -> implementation
 local_code_review approved=false -> implementation
 pr_review_followup comments_resolved=false -> implementation
 requires_i18n=true -> i18n_check -> ci_watch_repair
@@ -188,6 +191,7 @@ child task metadata 记录 `execution_backend`：
 
 - `implementation`
 - `ci_watch_repair`
+- `branch_sync_repair`
 - `local_code_review`
 - `pr_review_followup`
 - `closeout_sync`
