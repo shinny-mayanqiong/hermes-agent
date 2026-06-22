@@ -308,6 +308,9 @@ ci_watch_repair.success=true and mergeable conflicting/dirty/unknown
 branch_sync_repair.success=true
   -> ci_watch_repair
 
+branch_sync_repair.success=false and retry_branch_sync=true
+  -> branch_sync_repair
+
 branch_sync_repair.success=false
   -> implementation
 

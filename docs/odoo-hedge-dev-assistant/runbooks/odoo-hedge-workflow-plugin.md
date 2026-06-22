@@ -171,6 +171,7 @@ spec_blueprint_review approved=false -> spec_freeze 或 blueprint_prompts
 ci_watch_repair success=false -> implementation
 ci_watch_repair success=true 且 mergeable=CONFLICTING/DIRTY/UNKNOWN -> branch_sync_repair
 branch_sync_repair success=true -> ci_watch_repair
+branch_sync_repair success=false 且 retry_branch_sync=true -> branch_sync_repair vN+1
 branch_sync_repair success=false -> implementation
 local_code_review approved=false -> implementation
 pr_review_followup comments_resolved=false -> implementation

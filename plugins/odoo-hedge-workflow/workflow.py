@@ -80,6 +80,9 @@ PHASE_OUTPUT_EXTRAS = {
         "success": True,
         "synced": True,
         "conflicts_resolved": True,
+        "retry_branch_sync": False,
+        "mergeable": "MERGEABLE",
+        "merge_state_status": "CLEAN",
         "needs_user_input": False,
         "artifacts": [],
         "blockers": [],
@@ -166,6 +169,17 @@ PHASE_FORBIDDEN_ACTIONS = {
     "local_code_review": ["edit_business_code", "git_commit", "git_push", "create_pr"],
     "closeout_sync": ["edit_business_code"],
     "project_followup": ["edit_business_code", "git_commit", "git_push"],
+}
+
+PHASE_INSTRUCTIONS = {
+    "branch_sync_repair": [
+        "本阶段目标是修复 PR branch 与 base branch 的可合并状态，不是普通 CI 观察。",
+        "必须先读取 PR mergeable / mergeStateStatus；如果是 CONFLICTING、DIRTY、UNKNOWN 或 behind，必须 fetch base branch 并 rebase 或 merge base branch。",
+        "如果发生冲突，优先解决 branch sync 冲突并保持原 feature scope；无法判断业务取舍时设置 needs_user_input=true。",
+        "完成后必须 push 当前 branch，并重新读取 PR mergeable / mergeStateStatus。",
+        "最终 JSON 必须包含 success、synced、conflicts_resolved、mergeable、merge_state_status。",
+        "如果未实际完成 branch sync，但仍需要重试本阶段，设置 success=false 和 retry_branch_sync=true。",
+    ],
 }
 
 
@@ -719,14 +733,23 @@ def _child_body(
         f"Odoo Hedge workflow child task: `{phase}` iteration {iteration}.",
         "",
         "请严格遵守 metadata 中的 allowed_actions / forbidden_actions。",
-        "完成时必须在 task summary/result 中包含一个 JSON object，字段至少包括：",
-        "",
-        _json_block(_phase_output_example(root_meta, phase, iteration)),
-        "",
-        "Task metadata:",
-        "",
-        _json_block(data),
     ]
+    instructions = PHASE_INSTRUCTIONS.get(phase) or []
+    if instructions:
+        lines.extend(["", "Phase-specific instructions:"])
+        lines.extend(f"- {item}" for item in instructions)
+    lines.extend(
+        [
+            "",
+            "完成时必须在 task summary/result 中包含一个 JSON object，字段至少包括：",
+            "",
+            _json_block(_phase_output_example(root_meta, phase, iteration)),
+            "",
+            "Task metadata:",
+            "",
+            _json_block(data),
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -1092,6 +1115,8 @@ def _next_from_child(child: kb.Task) -> tuple[str | None, int, str]:
     if phase == "branch_sync_repair":
         if result.get("success") is True or result.get("synced") is True:
             return "ci_watch_repair", iteration, "branch sync completed; rerun CI"
+        if result.get("retry_branch_sync") is True:
+            return "branch_sync_repair", iteration + 1, "branch sync was not completed; retry branch sync"
         if result.get("success") is False or result.get("conflicts_resolved") is False:
             return "implementation", iteration + 1, "branch sync needs implementation fixes"
         return None, iteration, "branch_sync_repair result missing success=true/false"
@@ -1356,6 +1381,12 @@ def _codex_exec_prompt(task: kb.Task, meta: dict[str, Any]) -> str:
     issue = meta.get("issue")
     artifacts = meta.get("prompt_artifacts") or []
     artifact_lines = "\n".join(f"- {path}" for path in artifacts) if artifacts else "- (none)"
+    instructions = PHASE_INSTRUCTIONS.get(str(phase)) or []
+    instruction_lines = "\n".join(f"- {item}" for item in instructions)
+    try:
+        iteration = int(meta.get("iteration") or 1)
+    except (TypeError, ValueError):
+        iteration = 1
     return "\n".join(
         [
             f"你正在执行 odoo-hedge workflow phase: {phase}.",
@@ -1369,6 +1400,9 @@ def _codex_exec_prompt(task: kb.Task, meta: dict[str, Any]) -> str:
             "输入 artifacts:",
             artifact_lines,
             "",
+            "本阶段特别要求:",
+            instruction_lines if instruction_lines else "- 按 task metadata 和指定 skill 完成本阶段。",
+            "",
             "约束:",
             "- 只能在当前 worktree 中工作，不能修改主 repo 根目录。",
             "- 不要创建下一阶段 Kanban task；workflow 推进只能由 Hermes tick 完成。",
@@ -1377,19 +1411,7 @@ def _codex_exec_prompt(task: kb.Task, meta: dict[str, Any]) -> str:
             "- 如果新增或修改可见 UI 文案，在最终 JSON 中设置 requires_i18n=true。",
             "",
             "完成时，最后回复必须包含一个 JSON object，字段至少包括:",
-            _json_block(
-                {
-                    "workflow_id": meta.get("workflow_id"),
-                    "phase": phase,
-                    "iteration": meta.get("iteration"),
-                    "status": "done",
-                    "artifacts": [],
-                    "blockers": [],
-                    "needs_user_input": False,
-                    "needs_followup_issue": False,
-                    "next_recommended_phase": "<phase>",
-                }
-            ),
+            _json_block(_phase_output_example(meta, str(phase), iteration)),
         ]
     )
 
