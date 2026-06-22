@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .cli import odoo_hedge_workflow_command, register_cli
+from .pr_review import pr_review_command, pre_gateway_dispatch
 from .workflow import kanban_spawn_override
 
 
@@ -17,4 +18,12 @@ def register(ctx) -> None:
             "Creates root tasks, advances dynamic DAG phases, and reports status."
         ),
     )
+    ctx.register_command(
+        "pr-review",
+        pr_review_command,
+        description="Review an Odoo Hedge PR via Codex.",
+        args_hint="<PR_URL|PR_NUMBER> [focus]",
+        platforms=("slack",),
+    )
     ctx.register_hook("kanban_spawn_override", kanban_spawn_override)
+    ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)

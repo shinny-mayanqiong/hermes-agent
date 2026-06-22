@@ -18,6 +18,10 @@ from hermes_cli import kanban_db as kb
 
 WORKFLOW_TYPE = "odoo_hedge_dynamic_delivery_v1"
 WORKFLOW_PLUGIN_AUTHOR = "odoo-hedge-workflow"
+PR_REVIEW_DEFAULT_REPO = "/home/user/Repos/odoo-hedge"
+PR_REVIEW_DEFAULT_BOARD = "odoo-hedge-dev"
+PR_REVIEW_DEFAULT_REPO_SLUG = "shinnytech/odoo-hedge"
+PR_REVIEW_ENTRY = "pr_review"
 
 ORCHESTRATOR = "odoo-hedge-orchestrator"
 SPEC = "odoo-hedge-spec"
@@ -257,6 +261,18 @@ class WorktreeResolution:
     resources: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class PullRequestRef:
+    owner: str
+    repo_name: str
+    number: int
+    url: str
+
+    @property
+    def repo_slug(self) -> str:
+        return f"{self.owner}/{self.repo_name}"
+
+
 def _json_block(data: dict[str, Any]) -> str:
     return "```json\n" + json.dumps(data, ensure_ascii=False, indent=2) + "\n```"
 
@@ -474,6 +490,210 @@ def _github_repo_slug(repo: Path) -> str | None:
     if not match:
         return None
     return f"{match.group(1)}/{match.group(2)}"
+
+
+def _clean_pr_token(token: str) -> str:
+    value = (token or "").strip()
+    if value.startswith("<") and value.endswith(">"):
+        value = value[1:-1]
+    if "|" in value and value.startswith(("http://", "https://")):
+        value = value.split("|", 1)[0]
+    return value.strip()
+
+
+def parse_pr_review_request(
+    raw_args: str,
+    *,
+    default_repo_slug: str = PR_REVIEW_DEFAULT_REPO_SLUG,
+) -> tuple[PullRequestRef, str]:
+    """Parse ``/pr-review`` args into a PR reference and optional focus text."""
+    raw = (raw_args or "").strip()
+    if not raw:
+        raise ValueError("Usage: /pr-review <PR_URL|PR_NUMBER> [extra review focus]")
+
+    if raw.startswith("<") and ">" in raw:
+        end = raw.index(">")
+        token = raw[: end + 1]
+        focus = raw[end + 1 :].strip()
+    else:
+        try:
+            tokens = shlex.split(raw)
+        except ValueError as exc:
+            raise ValueError(f"invalid /pr-review arguments: {exc}") from exc
+        if not tokens:
+            raise ValueError("Usage: /pr-review <PR_URL|PR_NUMBER> [extra review focus]")
+        token = tokens[0]
+        focus = " ".join(tokens[1:]).strip()
+
+    token = _clean_pr_token(token)
+    if re.fullmatch(r"\d+", token):
+        owner, repo_name = default_repo_slug.split("/", 1)
+        number = int(token)
+        return (
+            PullRequestRef(
+                owner=owner,
+                repo_name=repo_name,
+                number=number,
+                url=f"https://github.com/{owner}/{repo_name}/pull/{number}",
+            ),
+            focus,
+        )
+
+    match = re.match(
+        r"^(?:https?://)?github\.com/([^/]+)/([^/]+)/pull/(\d+)(?:[/?#].*)?$",
+        token,
+        re.IGNORECASE,
+    )
+    if not match:
+        raise ValueError("Usage: /pr-review <PR_URL|PR_NUMBER> [extra review focus]")
+    owner, repo_name, number_text = match.groups()
+    repo_name = repo_name.removesuffix(".git")
+    number = int(number_text)
+    return (
+        PullRequestRef(
+            owner=owner,
+            repo_name=repo_name,
+            number=number,
+            url=f"https://github.com/{owner}/{repo_name}/pull/{number}",
+        ),
+        focus,
+    )
+
+
+def _load_pr_metadata(pr: PullRequestRef) -> dict[str, Any]:
+    fields = ",".join(
+        [
+            "number",
+            "url",
+            "title",
+            "body",
+            "author",
+            "baseRefName",
+            "headRefName",
+            "headRefOid",
+            "isDraft",
+            "mergeStateStatus",
+            "reviewDecision",
+            "statusCheckRollup",
+        ]
+    )
+    try:
+        proc = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(pr.number),
+                "--repo",
+                pr.repo_slug,
+                "--json",
+                fields,
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise ValueError("gh CLI is required for /pr-review") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        raise ValueError(f"failed to read PR #{pr.number}: {detail or exc}") from exc
+
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"gh returned invalid JSON for PR #{pr.number}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"gh returned unexpected PR payload for #{pr.number}")
+    data["number"] = int(data.get("number") or pr.number)
+    data["url"] = data.get("url") or pr.url
+    return data
+
+
+def _pr_review_branch(pr_number: int, head_sha: str | None, head_ref: str | None) -> str:
+    suffix_source = (head_sha or head_ref or "unknown").strip()
+    suffix = _slugify(suffix_source)[:12] or "unknown"
+    return f"codex/pr-review-{pr_number}-{suffix}"
+
+
+def _matching_branch_worktree(repo: Path, branch: str) -> tuple[str, str | None] | None:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError:
+        return None
+    for entry in _parse_worktree_list(proc.stdout):
+        if _branch_short(entry.get("branch")) != branch:
+            continue
+        raw_path = entry.get("worktree")
+        if raw_path:
+            return str(Path(raw_path).expanduser().resolve()), branch
+    return None
+
+
+def _prepare_pr_review_worktree(
+    *,
+    repo: Path,
+    pr_number: int,
+    base_branch: str,
+    head_sha: str | None,
+    head_ref: str | None,
+) -> WorktreeResolution:
+    branch = _pr_review_branch(pr_number, head_sha, head_ref)
+    existing = _matching_branch_worktree(repo, branch)
+    if existing:
+        path, branch_name = existing
+        worktree_path = Path(path).resolve()
+        return WorktreeResolution(
+            repo=str(repo),
+            worktree=str(worktree_path),
+            branch=branch_name,
+            topic=f"pr-review-{pr_number}",
+            topic_source="pr_review",
+            source="existing",
+            resources=_worktree_resources(worktree_path),
+        )
+
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "fetch",
+            "origin",
+            f"+pull/{pr_number}/head:refs/heads/{branch}",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    script = repo / "scripts" / "codex-worktree.sh"
+    if not script.exists():
+        raise ValueError(f"worktree bootstrap script not found: {script}")
+    subprocess.run(
+        [str(script), "create", branch, base_branch, "--no-codex"],
+        cwd=str(repo),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    worktree = _default_worktree_root(repo) / branch.replace("/", "-")
+    if not worktree.exists():
+        raise ValueError(f"worktree script completed but path was not created: {worktree}")
+    return WorktreeResolution(
+        repo=str(repo),
+        worktree=str(worktree.resolve()),
+        branch=branch,
+        topic=f"pr-review-{pr_number}",
+        topic_source="pr_review",
+        source="created",
+        resources=_worktree_resources(worktree),
+    )
 
 
 def _topic_from_issue_body(repo: Path, issue: int) -> tuple[str | None, str | None]:
@@ -1049,6 +1269,161 @@ def start_workflow(
     }
 
 
+def _pr_review_task_body(
+    *,
+    metadata: dict[str, Any],
+    review_focus: str,
+) -> str:
+    pr = metadata.get("pr") or {}
+    lines = [
+        f"Odoo Hedge PR review task for PR #{pr.get('number')}.",
+        "",
+        "该 task 是一次性 PR review，不属于完整 issue delivery workflow。",
+        "它只执行 local_code_review，不由 odoo-hedge-workflow tick 推进下一阶段。",
+        "",
+        "Review focus:",
+        review_focus or "(none)",
+        "",
+        "Task metadata:",
+        "",
+        _json_block(metadata),
+    ]
+    return "\n".join(lines)
+
+
+def start_pr_review(
+    raw_args: str,
+    *,
+    board: str = PR_REVIEW_DEFAULT_BOARD,
+    repo: str = PR_REVIEW_DEFAULT_REPO,
+    requester: str | None = None,
+) -> dict[str, Any]:
+    repo_path = Path(repo).expanduser().resolve()
+    if not repo_path.exists():
+        raise ValueError(f"repo path does not exist: {repo_path}")
+
+    repo_slug = _github_repo_slug(repo_path) or PR_REVIEW_DEFAULT_REPO_SLUG
+    pr_ref, review_focus = parse_pr_review_request(
+        raw_args,
+        default_repo_slug=repo_slug,
+    )
+    if pr_ref.repo_slug.casefold() != repo_slug.casefold():
+        raise ValueError(
+            f"/pr-review only supports {repo_slug}; got {pr_ref.repo_slug}"
+        )
+
+    pr_data = _load_pr_metadata(pr_ref)
+    base_branch = str(pr_data.get("baseRefName") or "master")
+    head_ref = str(pr_data.get("headRefName") or "")
+    head_sha = str(pr_data.get("headRefOid") or "")
+    resolved = _prepare_pr_review_worktree(
+        repo=repo_path,
+        pr_number=pr_ref.number,
+        base_branch=base_branch,
+        head_sha=head_sha,
+        head_ref=head_ref,
+    )
+
+    workflow_id = f"pr-review-{pr_ref.number}-{(head_sha or head_ref or 'unknown')[:12]}"
+    metadata = {
+        "workflow_type": WORKFLOW_TYPE,
+        "workflow_id": workflow_id,
+        "entry": PR_REVIEW_ENTRY,
+        "review_only": True,
+        "root_task_id": None,
+        "phase": "local_code_review",
+        "iteration": 1,
+        "assignee_role": "code-reviewer",
+        "issue": None,
+        "repo": str(repo_path),
+        "repo_slug": repo_slug,
+        "worktree": resolved.worktree,
+        "branch": resolved.branch,
+        "base_branch": base_branch,
+        "worktree_source": resolved.source,
+        "worktree_resources": resolved.resources,
+        "parent_task_id": None,
+        "execution_backend": "codex_exec",
+        "skill": None,
+        "prompt_artifacts": [],
+        "allowed_actions": PHASE_ALLOWED_ACTIONS["local_code_review"],
+        "forbidden_actions": PHASE_FORBIDDEN_ACTIONS["local_code_review"],
+        "expected_output_schema": PHASE_SCHEMA["local_code_review"],
+        "review_focus": review_focus,
+        "requester": requester or "",
+        "pr": {
+            "number": pr_ref.number,
+            "url": pr_data.get("url") or pr_ref.url,
+            "title": pr_data.get("title") or "",
+            "body": pr_data.get("body") or "",
+            "author": pr_data.get("author") or {},
+            "baseRefName": base_branch,
+            "headRefName": head_ref,
+            "headRefOid": head_sha,
+            "isDraft": bool(pr_data.get("isDraft")),
+            "mergeStateStatus": pr_data.get("mergeStateStatus") or "",
+            "reviewDecision": pr_data.get("reviewDecision") or "",
+            "statusCheckRollup": pr_data.get("statusCheckRollup") or [],
+        },
+    }
+    body = _pr_review_task_body(metadata=metadata, review_focus=review_focus)
+    title_suffix = str(pr_data.get("title") or "").strip()
+    title = f"PR #{pr_ref.number}: local code review"
+    if title_suffix:
+        title = f"{title} - {title_suffix[:90]}"
+
+    idempotency_head = head_sha or head_ref or "unknown"
+    with kb.connect_closing(board=board) as conn:
+        task_id = kb.create_task(
+            conn,
+            title=title,
+            body=body,
+            assignee=CODE_REVIEWER,
+            created_by=WORKFLOW_PLUGIN_AUTHOR,
+            workspace_kind="worktree",
+            workspace_path=resolved.worktree,
+            branch_name=resolved.branch,
+            priority=0,
+            idempotency_key=(
+                f"{WORKFLOW_TYPE}:{PR_REVIEW_ENTRY}:{repo_slug}:"
+                f"{pr_ref.number}:{idempotency_head}"
+            ),
+            board=board,
+        )
+        kb.add_comment(
+            conn,
+            task_id,
+            WORKFLOW_PLUGIN_AUTHOR,
+            "\n".join(
+                [
+                    "pr_review_started: true",
+                    f"pr_url: {metadata['pr']['url']}",
+                    f"worktree: {resolved.worktree}",
+                    f"branch: {resolved.branch or ''}",
+                    f"requester: {requester or ''}",
+                    f"review_focus: {review_focus}",
+                ]
+            ),
+        )
+
+    return {
+        "kind": "pr_review",
+        "board": board,
+        "task_id": task_id,
+        "pr_number": pr_ref.number,
+        "pr_url": metadata["pr"]["url"],
+        "pr_title": metadata["pr"]["title"],
+        "repo": str(repo_path),
+        "repo_slug": repo_slug,
+        "worktree": resolved.worktree,
+        "worktree_source": resolved.source,
+        "branch": resolved.branch,
+        "base_branch": base_branch,
+        "head_sha": head_sha,
+        "review_focus": review_focus,
+    }
+
+
 def _normalized_approval(result: dict[str, Any], *, positive_next_phases: set[str]) -> bool | None:
     approved = result.get("approved")
     if isinstance(approved, bool):
@@ -1438,6 +1813,7 @@ def _codex_exec_prompt(task: kb.Task, meta: dict[str, Any]) -> str:
     phase = meta.get("phase")
     skill = meta.get("skill")
     issue = meta.get("issue")
+    pr = meta.get("pr") if isinstance(meta.get("pr"), dict) else {}
     artifacts = meta.get("prompt_artifacts") or []
     artifact_lines = "\n".join(f"- {path}" for path in artifacts) if artifacts else "- (none)"
     instructions = PHASE_INSTRUCTIONS.get(str(phase)) or []
@@ -1446,13 +1822,34 @@ def _codex_exec_prompt(task: kb.Task, meta: dict[str, Any]) -> str:
         iteration = int(meta.get("iteration") or 1)
     except (TypeError, ValueError):
         iteration = 1
+    issue_line = f"GitHub issue: #{issue}" if issue else "GitHub issue: (not provided)"
+    pr_lines: list[str] = []
+    if meta.get("entry") == PR_REVIEW_ENTRY or meta.get("review_only") is True:
+        pr_lines = [
+            "",
+            "PR review context:",
+            f"- PR: {pr.get('url') or '(unknown)'}",
+            f"- PR number: {pr.get('number') or '(unknown)'}",
+            f"- PR title: {pr.get('title') or '(unknown)'}",
+            f"- Base branch: {pr.get('baseRefName') or meta.get('base_branch') or '(unknown)'}",
+            f"- Head branch: {pr.get('headRefName') or '(unknown)'}",
+            f"- Head SHA: {pr.get('headRefOid') or '(unknown)'}",
+            f"- Review focus: {meta.get('review_focus') or '(none)'}",
+            "",
+            "Review-only task requirements:",
+            "- 只做 review，不修改代码、不提交、不 push、不创建 PR。",
+            "- 必须把详细 review 结论和改进建议发送为 top-level PR comment。",
+            "- PR comment 必须包含：问题背景、实现概述、需求合理性、实现合理性、UI/UX impact、review 结论、blocking findings、non-blocking findings、后续建议。",
+            "- 最终 JSON 必须包含 approved、review_decision、review_summary、blocking_findings、non_blocking_findings、pr_comment_url。",
+        ]
     return "\n".join(
         [
             f"你正在执行 odoo-hedge workflow phase: {phase}.",
-            f"GitHub issue: #{issue}",
+            issue_line,
             f"Kanban task: {task.id}",
             f"Worktree: {meta.get('worktree')}",
             f"Branch: {meta.get('branch')}",
+            *pr_lines,
             "",
             f"请使用 `.codex/skills/{skill}` 完成本阶段。" if skill else "请按 task metadata 完成本阶段。",
             "",
@@ -1585,6 +1982,13 @@ def run_codex_exec_worker(task_id: str, *, board: str) -> dict[str, Any]:
         reason = "codex exec completed without summary JSON"
         _block_current_run(task_id, board=board, run_id=run_id, reason=reason)
         return {"kind": "codex_exec_worker", "task_id": task_id, "status": "blocked", "reason": reason}
+    if meta.get("entry") == PR_REVIEW_ENTRY or meta.get("review_only") is True:
+        required = ("approved", "review_decision", "review_summary", "pr_comment_url")
+        missing = [key for key in required if metadata.get(key) in (None, "")]
+        if missing:
+            reason = "codex exec PR review summary missing required field(s): " + ", ".join(missing)
+            _block_current_run(task_id, board=board, run_id=run_id, reason=reason)
+            return {"kind": "codex_exec_worker", "task_id": task_id, "status": "blocked", "reason": reason}
 
     ok = _complete_current_run(
         task_id,

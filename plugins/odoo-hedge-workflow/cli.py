@@ -43,6 +43,15 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     p_status.add_argument("root_task_id", help="Workflow root task id")
     p_status.add_argument("--json", action="store_true", help="Emit JSON")
 
+    p_pr_review = sub.add_parser("pr-review", help="Create a one-shot PR review task")
+    p_pr_review.add_argument("--repo", default=workflow.PR_REVIEW_DEFAULT_REPO, help="Repository path")
+    p_pr_review.add_argument("--json", action="store_true", help="Emit JSON")
+    p_pr_review.add_argument(
+        "request",
+        nargs=argparse.REMAINDER,
+        help="PR URL or PR number plus optional review focus",
+    )
+
     p_worker = sub.add_parser(
         "codex-exec-worker",
         help=argparse.SUPPRESS,
@@ -93,6 +102,14 @@ def _print_result(result: dict, *, as_json: bool) -> None:
         if result.get("next_action"):
             print(f"Next:    {result['next_action']}")
         return
+    if kind == "pr_review":
+        print(f"PR review task: {result['task_id']}")
+        print(f"Board:          {result['board']}")
+        print(f"PR:             {result['pr_url']}")
+        print(f"Branch:         {result.get('branch') or '(unknown)'}")
+        print(f"Worktree:       {result.get('worktree') or '(unknown)'}")
+        print(f"Worktree mode:  {result.get('worktree_source') or '(unknown)'}")
+        return
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -126,6 +143,15 @@ def odoo_hedge_workflow_command(args: argparse.Namespace) -> int:
             return 0
         if command == "status":
             result = workflow.workflow_status(args.root_task_id, board=args.board)
+            _print_result(result, as_json=args.json)
+            return 0
+        if command == "pr-review":
+            result = workflow.start_pr_review(
+                " ".join(args.request or []).strip(),
+                board=args.board,
+                repo=args.repo,
+                requester="cli",
+            )
             _print_result(result, as_json=args.json)
             return 0
         if command == "codex-exec-worker":
