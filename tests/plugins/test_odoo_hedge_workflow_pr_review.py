@@ -156,6 +156,10 @@ def test_start_pr_review_creates_review_only_kanban_task(
     assert meta["review_focus"] == "focus on accounting edge cases"
     assert task.assignee == workflow.CODE_REVIEWER
     assert task.workspace_path == str(worktree)
+    with kb.connect_closing(board="odoo-hedge-dev") as conn:
+        comments = kb.list_comments(conn, result["task_id"])
+    assert any("pr: shinnytech/odoo-hedge#42" in comment.body for comment in comments)
+    assert all("https://github.com/shinnytech/odoo-hedge/pull/42" not in comment.body for comment in comments)
 
 
 def test_codex_exec_prompt_includes_pr_review_contract(workflow):

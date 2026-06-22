@@ -1397,7 +1397,7 @@ def start_pr_review(
             "\n".join(
                 [
                     "pr_review_started: true",
-                    f"pr_url: {metadata['pr']['url']}",
+                    f"pr: {repo_slug}#{pr_ref.number}",
                     f"worktree: {resolved.worktree}",
                     f"branch: {resolved.branch or ''}",
                     f"requester: {requester or ''}",
