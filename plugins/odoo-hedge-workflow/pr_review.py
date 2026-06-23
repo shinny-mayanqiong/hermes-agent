@@ -31,6 +31,23 @@ def _command_args(text: str) -> str | None:
     return None
 
 
+def _event_command_args(event: Any) -> str | None:
+    args = _command_args(str(getattr(event, "text", "") or ""))
+    if args is not None:
+        return args
+
+    raw = getattr(event, "raw_message", None)
+    if not isinstance(raw, dict):
+        return None
+    raw_command = str(raw.get("command") or "").strip().lower().lstrip("/")
+    if raw_command != "hermes":
+        return None
+    raw_text = str(raw.get("text") or "").strip()
+    if not raw_text:
+        return None
+    return _command_args("/" + raw_text.lstrip("/"))
+
+
 def _slack_client(adapter: Any, chat_id: str) -> Any:
     getter = getattr(adapter, "_get_client", None)
     if getter:
@@ -253,7 +270,7 @@ def pre_gateway_dispatch(event: Any, gateway: Any, **_: Any) -> dict[str, str] |
             logger.debug("[odoo-hedge-workflow] Auth check failed, falling through: %s", exc)
             return {"action": "allow"}
 
-    args = _command_args(str(getattr(event, "text", "") or ""))
+    args = _event_command_args(event)
     if args is None:
         return None
     _schedule_pr_review_event(event, gateway, args)

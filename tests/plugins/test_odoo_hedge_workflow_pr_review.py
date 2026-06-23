@@ -298,6 +298,13 @@ def test_pre_gateway_dispatch_does_not_bypass_auth(pr_review):
     assert result == {"action": "allow"}
 
 
+def test_legacy_hermes_pr_review_command_is_recognized(pr_review):
+    event = _event("pr-review 42 security review")
+    event.raw_message["command"] = "/hermes"
+
+    assert pr_review._event_command_args(event) == "42 security review"
+
+
 def test_register_exposes_pr_review_command_and_hook(plugin):
     class FakeCtx:
         def __init__(self):
