@@ -305,6 +305,15 @@ def test_legacy_hermes_pr_review_command_is_recognized(pr_review):
     assert pr_review._event_command_args(event) == "42 security review"
 
 
+def test_odoo_hedge_pr_review_command_alias_is_recognized(pr_review):
+    assert pr_review._command_args("/odoo-hedge-pr-review 42 security review") == "42 security review"
+
+    event = _event("odoo-hedge-pr-review 42 security review")
+    event.raw_message["command"] = "/hermes"
+
+    assert pr_review._event_command_args(event) == "42 security review"
+
+
 def test_register_exposes_pr_review_command_and_hook(plugin):
     class FakeCtx:
         def __init__(self):
@@ -324,6 +333,7 @@ def test_register_exposes_pr_review_command_and_hook(plugin):
     plugin.register(ctx)
 
     assert any(args[0] == "pr-review" for args, _kwargs in ctx.commands)
+    assert any(args[0] == "odoo-hedge-pr-review" for args, _kwargs in ctx.commands)
     hook_names = [args[0] for args, _kwargs in ctx.hooks]
     assert "pre_gateway_dispatch" in hook_names
     assert "kanban_spawn_override" in hook_names

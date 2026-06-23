@@ -25,5 +25,12 @@ def register(ctx) -> None:
         args_hint="<PR_URL|PR_NUMBER> [focus]",
         platforms=("slack",),
     )
+    ctx.register_command(
+        "odoo-hedge-pr-review",
+        pr_review_command,
+        description="Review an Odoo Hedge PR via Codex.",
+        args_hint="<PR_URL|PR_NUMBER> [focus]",
+        platforms=("slack",),
+    )
     ctx.register_hook("kanban_spawn_override", kanban_spawn_override)
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)

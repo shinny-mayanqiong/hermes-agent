@@ -11,9 +11,12 @@ from . import workflow
 
 logger = logging.getLogger(__name__)
 
-COMMAND_NAME = "pr-review"
-COMMAND_PREFIX = f"/{COMMAND_NAME}"
-ALT_COMMAND_PREFIX = f"!{COMMAND_NAME}"
+COMMAND_NAMES = ("pr-review", "odoo-hedge-pr-review")
+COMMAND_PREFIXES = tuple(
+    prefix
+    for name in COMMAND_NAMES
+    for prefix in (f"/{name}", f"!{name}")
+)
 
 
 def _platform_value(source: Any) -> str:
@@ -23,7 +26,7 @@ def _platform_value(source: Any) -> str:
 def _command_args(text: str) -> str | None:
     stripped = (text or "").strip()
     lower = stripped.lower()
-    for prefix in (COMMAND_PREFIX, ALT_COMMAND_PREFIX):
+    for prefix in COMMAND_PREFIXES:
         if lower == prefix:
             return ""
         if lower.startswith(prefix + " "):
@@ -122,7 +125,7 @@ def _format_requester(source: Any) -> str:
 
 
 def _usage() -> str:
-    return "Usage: `/pr-review <PR_URL|PR_NUMBER> [extra review focus]`"
+    return "Usage: `/odoo-hedge-pr-review <PR_URL|PR_NUMBER> [extra review focus]`"
 
 
 def _board() -> str:
@@ -279,6 +282,7 @@ def pre_gateway_dispatch(event: Any, gateway: Any, **_: Any) -> dict[str, str] |
 
 def pr_review_command(_: str) -> str:
     return (
-        "Use `/pr-review <PR_URL|PR_NUMBER> [extra review focus]` from Slack, "
+        "Use `/odoo-hedge-pr-review <PR_URL|PR_NUMBER> [extra review focus]` from Slack, "
+        "or `/hermes pr-review <PR_URL|PR_NUMBER> [extra review focus]`, "
         "or `hermes odoo-hedge-workflow pr-review <PR_URL|PR_NUMBER>` locally."
     )
