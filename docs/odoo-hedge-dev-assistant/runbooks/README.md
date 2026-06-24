@@ -49,16 +49,18 @@ gateway-slack.md
 codex-runtime-check.md
 ```
 
-## 初始 runbook 候选
+## 仍缺的 runbook
 
 - Hermes CLI/TUI 启动检查
-- dashboard `--tui` 启动检查
-- Slack gateway 启动与状态检查
 - `odoo-hedge` profile 切换与验证
 - provider / model 切换与验证
+- Slack App / Socket Mode 配置检查
+- dashboard 认证与网络边界检查
 
 ## 当前 runbooks
 
+- `local-systemd-deployment.md` - 本机 `odoo-hedge-dev` gateway/dashboard
+  的 `systemd --user` 部署、状态检查、日志和重启方式。
 - `odoo-hedge-dev-profile.md` - profile 配置、隔离 HOME、GitHub CLI 和
   commit 身份约定。
 - `odoo-hedge-workflow-plugin.md` - `odoo-hedge-workflow` plugin 的

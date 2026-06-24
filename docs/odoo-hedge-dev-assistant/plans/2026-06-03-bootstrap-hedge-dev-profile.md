@@ -5,9 +5,14 @@
 建立一个面向开发人员的 Hermes 使用入口，让 Hermes 默认作为
 `/home/user/Repos/odoo-hedge` 的开发助手运行。
 
+> 2026-06-24 状态更新：本 bootstrap 计划的基础目标已经完成。
+> 当前本机 gateway/dashboard 部署事实见
+> `../runbooks/local-systemd-deployment.md`，当前 profile 状态见
+> `../runbooks/odoo-hedge-dev-profile.md`。
+
 ## 背景
 
-当前 Hermes 本机配置已经使用：
+以下为 2026-06-03 初始背景。默认 Hermes home 当时已经使用：
 
 - `model.provider: openai-codex`
 - `model.default: gpt-5.5`
@@ -16,10 +21,10 @@ Codex CLI 已可用：
 
 - `codex-cli 0.136.0`
 
-但仍存在几个缺口：
+2026-06-03 当时仍存在几个缺口：
 
-- 当前 shell 中 `hermes` 命令不可见。
-- `terminal.cwd` 仍是 `.`，尚未指向 `odoo-hedge`。
+- 当时的 shell 中 `hermes` 命令不可见。
+- 默认 Hermes home 的 `terminal.cwd` 当时仍是 `.`，尚未指向 `odoo-hedge`。
 - `skills.external_dirs` 为空。
 - 已有 `~/.hermes/skills/domain/odoo-hedge*` skills 面向业务用户，不是开发人员
   使用的开发 workflow。
@@ -64,7 +69,7 @@ Codex CLI 已可用：
 
 ```text
 /home/user/Repos/hermes-agent/.venv/bin/hermes
-Hermes Agent v0.15.1 (2026.5.29)
+Hermes Agent v0.17.0 (2026.6.19)
 ```
 
 ### 操作

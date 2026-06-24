@@ -49,13 +49,16 @@ YYYY-MM-DD-short-topic.md
 2026-06-03-bootstrap-hedge-dev-profile.md
 ```
 
-## 初始计划候选
+## 初始计划候选（历史）
 
 - 建立 `odoo-hedge` 专用 Hermes profile
 - 迁移 `.cursor/skills/hedge_ci_check` 到 Hermes skill
 - 为 `odoo-hedge` 创建开发工作流 skill
 - 配置 Slack gateway 的用户和频道 allowlist
 - 建立 dashboard `--tui` 日常使用 runbook
+
+其中 profile、Slack gateway、dashboard 和 V2 workflow plugin 已进入当前运行
+状态。实际部署和运维步骤见 `../runbooks/local-systemd-deployment.md`。
 
 ## 当前重点文档
 

@@ -24,6 +24,8 @@ The goal is to build an incremental, maintainable setup where Hermes can support
 - Odoo Hedge authoritative docs: `/home/user/Repos/odoo-hedge/hedge_docs/README.md`
 - Local Hermes config: `~/.hermes/config.yaml`
 - Local Hermes secrets: `~/.hermes/.env`
+- Deployed `odoo-hedge-dev` profile config:
+  `/home/user/.hermes/profiles/odoo-hedge-dev/config.yaml`
 
 ## Documentation Sections
 
@@ -61,6 +63,7 @@ spec discussion -> spec freeze -> blueprint -> spec/blueprint review
 当前 `odoo-hedge-workflow` plugin 已按 V2 skill-based workflow 实现，runbook 见：
 
 - `runbooks/odoo-hedge-workflow-plugin.md`
+- `runbooks/local-systemd-deployment.md`
 
 查看过程：
 
@@ -68,13 +71,34 @@ spec discussion -> spec freeze -> blueprint -> spec/blueprint review
 - CLI：`hermes -p odoo-hedge-dev kanban --board odoo-hedge-dev list`
 - 单任务详情：`hermes -p odoo-hedge-dev kanban --board odoo-hedge-dev show <task_id>`
 
-## First Milestones
+## Current Local Deployment
+
+截至 2026-06-24，本机 `/home/user/Repos/hermes-agent` 是实际部署
+`odoo-hedge` 开发辅助 Hermes 的机器。
+
+`odoo-hedge-dev` gateway 与 dashboard 以当前 Linux 用户的
+`systemd --user` unit 运行：
+
+- `hermes-odoo-hedge-dev.target`
+- `hermes-gateway-odoo-hedge-dev.service`
+- `hermes-dashboard-odoo-hedge-dev.service`
+
+运维事实源：
+
+- `runbooks/local-systemd-deployment.md`
+
+## Bootstrap Milestones
+
+已完成：
 
 1. Make the `hermes` command reliable on this development machine.
-2. Create a dedicated `odoo-hedge` Hermes profile.
+2. Create a dedicated `odoo-hedge-dev` Hermes profile.
 3. Wire `terminal.cwd` to `/home/user/Repos/odoo-hedge`.
-4. Add external skill directories for existing local and repo-specific skills.
-5. Create development-focused Hermes skills for `odoo-hedge`.
-6. Enable Slack gateway with narrow user/channel allowlists.
-7. Enable dashboard chat with `hermes dashboard --tui`.
-8. Decide when API Server integration is actually needed.
+4. Create development-focused Hermes profiles and role skills for `odoo-hedge`.
+5. Enable Slack gateway with narrow user/channel allowlists.
+6. Enable dashboard chat through the user systemd dashboard service.
+7. Enable the V2 `odoo-hedge-workflow` plugin.
+
+仍需按需求决定：
+
+- Decide when API Server integration is actually needed.

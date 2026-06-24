@@ -39,6 +39,12 @@ alias 路径：
 /home/user/.local/bin/odoo-hedge-dev
 ```
 
+本机 gateway/dashboard 的实际部署方式见：
+
+```text
+docs/odoo-hedge-dev-assistant/runbooks/local-systemd-deployment.md
+```
+
 ## 检查 Hermes CLI
 
 ```bash
@@ -53,7 +59,7 @@ hermes --version
 
 ```text
 /home/user/Repos/hermes-agent/.venv/bin/hermes
-Hermes Agent v0.15.1
+Hermes Agent v0.17.0 (2026.6.19)
 ```
 
 ## 查看 profile
@@ -70,11 +76,16 @@ hermes profile show odoo-hedge-dev
 
 - `odoo-hedge-dev` 出现在 profile list 中。
 - model 显示为 `gpt-5.5 (openai-codex)`。
-- alias 显示为 `/home/user/.local/bin/odoo-hedge-dev`。
+- alias 显示为 `odoo-hedge-dev -> hermes -p odoo-hedge-dev`
+  或 `/home/user/.local/bin/odoo-hedge-dev`。
 
-## 待完成配置
+注意：如果 `hermes profile show odoo-hedge-dev` 的 `Gateway` 字段显示
+`stopped`，不要据此判断本机部署状态。当前 gateway/dashboard 是自定义
+`systemd --user` unit，状态以 `systemctl --user` 为准。
 
-当前 `odoo-hedge-dev` profile 仍需确认并设置：
+## 已确认配置
+
+当前 `odoo-hedge-dev` profile 已设置：
 
 ```yaml
 terminal:

@@ -2,7 +2,8 @@
 
 ## 范围
 
-本盘点记录当前开发机器上 Hermes 作为 `odoo-hedge` 开发助手的初始状态。
+本盘点记录当前开发机器上 Hermes 作为 `odoo-hedge` 开发助手的状态。
+原始盘点日期为 2026-06-03；本文已补充 2026-06-24 的本机部署状态更新。
 
 盘点对象：
 
@@ -10,6 +11,7 @@
 - `~/.hermes/config.yaml` 中与开发助手有关的配置
 - Codex CLI 可用性
 - Hermes CLI 可用性
+- `odoo-hedge-dev` user systemd 部署状态
 - 现有 `odoo-hedge` 相关 skills
 - `odoo-hedge/.codex` 可复用资产
 
@@ -27,6 +29,9 @@
 
 配置文件：`~/.hermes/config.yaml`
 
+这是默认 Hermes home 的配置摘要，不是 `odoo-hedge-dev` profile 的最终运行
+配置。`odoo-hedge-dev` profile 配置见下文。
+
 已观察到的关键配置：
 
 - `model.provider: openai-codex`
@@ -43,8 +48,9 @@
 结论：
 
 - 当前主模型配置已经偏向 Codex。
-- 当前 `terminal.cwd` 还没有指向 `/home/user/Repos/odoo-hedge`。
-- 当前还没有把 repo-specific skills 或外部 skills 目录接入 Hermes。
+- 默认 Hermes home 的 `terminal.cwd` 没有指向 `/home/user/Repos/odoo-hedge`。
+- `odoo-hedge-dev` profile 已单独配置为在 `/home/user/Repos/odoo-hedge` 工作。
+- 默认 Hermes home 还没有把 repo-specific skills 或外部 skills 目录接入 Hermes。
 - 当前 delegation 尚未单独配置 DeepSeek 或其他辅助 provider。
 
 ## Codex CLI
@@ -76,7 +82,7 @@ WARNING: proceeding, even though we could not update PATH: Read-only file system
 
 ```text
 /home/user/Repos/hermes-agent/.venv/bin/hermes
-Hermes Agent v0.15.1 (2026.5.29)
+Hermes Agent v0.17.0 (2026.6.19) · upstream 935f2bc4 · local b926b716 (+41 carried commits)
 ```
 
 结论：
@@ -104,11 +110,15 @@ Profile: odoo-hedge-dev
 Path:    /home/user/.hermes/profiles/odoo-hedge-dev
 Model:   gpt-5.5 (openai-codex)
 Gateway: stopped
-Skills:  90
+Skills:  45
 .env:    exists
 SOUL.md: exists
-Alias:   /home/user/.local/bin/odoo-hedge-dev
+Alias:   odoo-hedge-dev -> hermes -p odoo-hedge-dev  (/home/user/.local/bin/odoo-hedge-dev)
 ```
+
+注意：`Gateway: stopped` 来自 `hermes profile show`，不能代表当前本机实际
+gateway 部署状态。当前 gateway/dashboard 由自定义 `systemd --user` unit
+运行，状态以 `systemctl --user` 为准。
 
 profile 配置文件：
 
@@ -129,7 +139,55 @@ profile 配置文件：
 - `odoo-hedge-dev` profile 已创建。
 - profile alias 已创建：`/home/user/.local/bin/odoo-hedge-dev`。
 - profile 已配置为在 `/home/user/Repos/odoo-hedge` 工作。
-- 后续需要验证 alias 是否在普通 shell 的 PATH 中可直接运行。
+- 当前本机部署状态见
+  `docs/odoo-hedge-dev-assistant/runbooks/local-systemd-deployment.md`。
+
+## 本机 systemd 部署状态
+
+截至 2026-06-24，本机 `/home/user/Repos/hermes-agent` 是实际部署
+`odoo-hedge` 开发辅助 Hermes 的机器。
+
+当前 user systemd units：
+
+```text
+hermes-odoo-hedge-dev.target
+hermes-gateway-odoo-hedge-dev.service
+hermes-dashboard-odoo-hedge-dev.service
+```
+
+已观察状态：
+
+```text
+hermes-dashboard-odoo-hedge-dev.service loaded active running
+hermes-gateway-odoo-hedge-dev.service   loaded active running
+hermes-odoo-hedge-dev.target            loaded active active
+```
+
+unit 文件：
+
+```text
+/home/user/.config/systemd/user/hermes-odoo-hedge-dev.target
+/home/user/.config/systemd/user/hermes-gateway-odoo-hedge-dev.service
+/home/user/.config/systemd/user/hermes-dashboard-odoo-hedge-dev.service
+```
+
+Gateway 启动命令：
+
+```text
+/home/user/Repos/hermes-agent/.venv/bin/python -m hermes_cli.main --profile odoo-hedge-dev gateway run --replace
+```
+
+Dashboard 启动命令：
+
+```text
+/home/user/Repos/hermes-agent/.venv/bin/hermes -p odoo-hedge-dev dashboard --tui --skip-build --no-open --host 0.0.0.0 --port 9119 --insecure
+```
+
+结论：
+
+- Slack gateway 与 dashboard 已不是“待启用”状态。
+- Hermes 代码更新、rebase 或 plugin 更新后，需要通过 `systemctl --user`
+  重启对应 service 才能让运行中 gateway/dashboard 加载新代码。
 
 ## 多角色开发 profiles
 
