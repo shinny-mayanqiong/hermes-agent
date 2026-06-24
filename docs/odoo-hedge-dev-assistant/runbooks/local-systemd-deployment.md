@@ -61,7 +61,7 @@ Gateway service：
 Dashboard service：
 
 ```text
-/home/user/Repos/hermes-agent/.venv/bin/hermes -p odoo-hedge-dev dashboard --tui --skip-build --no-open --host 0.0.0.0 --port 9119 --insecure
+/home/user/Repos/hermes-agent/.venv/bin/hermes -p odoo-hedge-dev dashboard --tui --skip-build --no-open --host 127.0.0.1 --port 9119 --insecure
 ```
 
 两个 service 当前 `WorkingDirectory` 均为：
@@ -195,10 +195,13 @@ systemctl --user restart hermes-gateway-odoo-hedge-dev.service
 systemctl --user restart hermes-dashboard-odoo-hedge-dev.service
 ```
 
-## 安全边界
+## Dashboard 绑定与安全边界
 
-Dashboard 当前使用 `--host 0.0.0.0 --port 9119 --insecure`。这记录的是当前
-本机开发部署事实，不是安全默认值。
+Dashboard 当前使用 `--host 127.0.0.1 --port 9119 --insecure`，只绑定本机
+loopback。`--insecure` 在 loopback 场景下允许本地无认证访问，适合通过
+SSH / Tailscale tunnel 进入。
 
-如果 dashboard 暴露到不可信网络，必须先补认证、反向代理或网络访问控制，
-再继续使用 `0.0.0.0` 绑定。
+Hermes 2026-06 的 dashboard hardening 已不再允许无认证 public bind：
+如果改回 `--host 0.0.0.0` 或其他非 loopback 地址，必须先配置 dashboard
+auth provider，例如 `dashboard.basic_auth` 或 `hermes dashboard register`。
+否则 dashboard 会拒绝启动并进入 systemd 重启循环。

@@ -180,7 +180,7 @@ Gateway 启动命令：
 Dashboard 启动命令：
 
 ```text
-/home/user/Repos/hermes-agent/.venv/bin/hermes -p odoo-hedge-dev dashboard --tui --skip-build --no-open --host 0.0.0.0 --port 9119 --insecure
+/home/user/Repos/hermes-agent/.venv/bin/hermes -p odoo-hedge-dev dashboard --tui --skip-build --no-open --host 127.0.0.1 --port 9119 --insecure
 ```
 
 结论：
@@ -188,6 +188,8 @@ Dashboard 启动命令：
 - Slack gateway 与 dashboard 已不是“待启用”状态。
 - Hermes 代码更新、rebase 或 plugin 更新后，需要通过 `systemctl --user`
   重启对应 service 才能让运行中 gateway/dashboard 加载新代码。
+- Dashboard 绑定本机 loopback。无认证 `0.0.0.0` public bind 已被当前 Hermes
+  安全检查拒绝；如需公网或局域网访问，必须先配置 dashboard auth。
 
 ## 多角色开发 profiles
 
