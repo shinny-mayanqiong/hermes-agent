@@ -3,6 +3,24 @@
 Opt-in Hermes plugin for forwarding selected Slack Socket Mode Block Kit actions
 to an internal HTTP endpoint.
 
+## Current deployment purpose
+
+This plugin is used by the `zq_hedge` Sentry autofix flow.
+
+1. Sentry issues are sent to `zq_hedge_autofix_bot`.
+2. `zq_hedge_autofix_bot` analyzes the issue and posts a Slack message with two
+   Block Kit action buttons: `create_issue` and `create_issue_and_pr`.
+3. The Hermes Slack app/gateway is the Socket Mode and interactivity entrypoint,
+   so button clicks arrive at Hermes first.
+4. This plugin registers handlers for those button action IDs and forwards a
+   compact JSON payload back to `zq_hedge_autofix_bot`.
+5. `zq_hedge_autofix_bot` performs the follow-up action: create an issue or
+   queue a PR repair.
+
+Implementation note: current Hermes plugins should register Slack Block Kit
+action handlers with `ctx.register_slack_action_handler(action_id, callback)`.
+Do not monkey-patch `SlackAdapter` or import adapter internals directly.
+
 Default behavior:
 
 - Action IDs: `create_issue`, `create_issue_and_pr`

@@ -16,6 +16,7 @@ The goal is to build an incremental, maintainable setup where Hermes can support
 - web dashboard for sessions, logs, skills, gateway, and browser chat
 - OpenAI Codex as the main coding provider
 - DeepSeek as a validated auxiliary or delegated provider
+- Slack Block Kit action forwarding for the `zq_hedge` Sentry autofix flow
 
 ## Source Boundaries
 
@@ -83,6 +84,12 @@ spec discussion -> spec freeze -> blueprint -> spec/blueprint review
 - `hermes-gateway-odoo-hedge-dev.service`
 - `hermes-dashboard-odoo-hedge-dev.service`
 
+当前 gateway 同时启用 `slack-socket-forwarder` plugin。它用于
+`zq_hedge_autofix_bot` 的 Sentry 自动修复流程：Sentry issue 经 bot 分析后
+发送到 Slack，并带有 `create_issue` / `create_issue_and_pr` 两个 action 按钮；
+按钮点击事件由 Hermes Slack app 接收，再由该 plugin 转发回
+`zq_hedge_autofix_bot` 的 internal interaction endpoint。
+
 运维事实源：
 
 - `runbooks/local-systemd-deployment.md`
@@ -98,6 +105,8 @@ spec discussion -> spec freeze -> blueprint -> spec/blueprint review
 5. Enable Slack gateway with narrow user/channel allowlists.
 6. Enable dashboard chat through the user systemd dashboard service.
 7. Enable the V2 `odoo-hedge-workflow` plugin.
+8. Enable `slack-socket-forwarder` for `zq_hedge` Sentry autofix button
+   actions.
 
 仍需按需求决定：
 

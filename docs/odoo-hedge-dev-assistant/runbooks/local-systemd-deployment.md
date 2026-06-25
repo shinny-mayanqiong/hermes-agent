@@ -78,6 +78,86 @@ Gateway service 还加载环境文件：
 
 不要把该文件内容写入仓库文档。文档中只记录路径和用途。
 
+## Slack Socket action forwarder
+
+当前 `odoo-hedge-dev` gateway 启用了 Hermes bundled plugin：
+
+```yaml
+plugins:
+  enabled:
+    - slack-socket-forwarder
+```
+
+该 plugin 服务于 `zq_hedge` 项目的 Sentry 自动修复流程：
+
+1. Sentry issue 发送到 `zq_hedge_autofix_bot`。
+2. `zq_hedge_autofix_bot` 分析问题后，把结果发送到 Slack，并带上两个
+   Block Kit action 按钮：`create_issue` 和 `create_issue_and_pr`。
+3. 由于 `hermes_agent` Slack app / gateway 是当前 Slack Socket Mode 与
+   interactivity 的总入口，按钮点击事件会先进入 Hermes。
+4. `slack-socket-forwarder` 在 Hermes gateway 内注册这两个 action handler，
+   并把点击事件转发回 `zq_hedge_autofix_bot` 的 internal endpoint。
+5. `zq_hedge_autofix_bot` 根据 action 执行后续 `create issue` 或 `create PR`
+   操作。
+
+默认转发目标：
+
+```text
+http://192.168.139.8:9000/internal/slack/socket-interactions
+```
+
+默认转发 action IDs：
+
+```text
+create_issue,create_issue_and_pr
+```
+
+如需覆盖默认值，在 gateway service 的环境中设置：
+
+```text
+SLACK_SOCKET_FORWARD_URL
+SLACK_SOCKET_FORWARD_ACTION_IDS
+SLACK_SOCKET_FORWARD_TIMEOUT_SECONDS
+```
+
+当前没有必要在 systemd unit 中显式设置这些变量；未设置时 plugin 使用仓库内
+默认值。不要在文档中记录 token、secret 或环境文件明文。
+
+实现约定：Hermes 当前推荐插件通过
+`ctx.register_slack_action_handler(action_id, callback)` 参与 Slack Block Kit
+interactivity。不要再 monkey-patch `SlackAdapter` 或直接依赖 adapter 的旧模块
+路径。此前上游迁移 Slack adapter 到 `plugins/platforms/slack/adapter.py` 后，
+旧 patch 路径会导致 plugin 加载失败。
+
+验证插件启用：
+
+```bash
+rg -n "slack-socket-forwarder" /home/user/.hermes/profiles/odoo-hedge-dev/config.yaml
+hermes -p odoo-hedge-dev plugins list --plain | rg "slack-socket-forwarder"
+```
+
+验证运行时注册和转发：
+
+```bash
+tail -200 /home/user/.hermes/profiles/odoo-hedge-dev/logs/agent.log | rg "slack-socket-forwarder|Wired .*plugin action|Forwarded Slack action|Failed to load plugin"
+tail -200 /home/user/.hermes/profiles/odoo-hedge-dev/logs/gateway.log | rg "slack-socket-forwarder|Wired .*plugin action|Forwarded Slack action|Failed to load plugin"
+```
+
+预期能看到类似日志：
+
+```text
+[slack-socket-forwarder] Registered Slack action forwarders: create_issue, create_issue_and_pr
+[Slack] Wired 2 plugin action handler(s)
+[slack-socket-forwarder] Forwarded Slack action create_issue...
+```
+
+如果只修改 `slack-socket-forwarder` 或 Slack gateway action handling，重启
+gateway 即可，不需要重启 dashboard：
+
+```bash
+systemctl --user restart hermes-gateway-odoo-hedge-dev.service
+```
+
 Dashboard public bind 通过 `dashboard.basic_auth` 保护。当前 auth 配置写在：
 
 ```text

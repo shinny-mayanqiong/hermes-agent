@@ -60,7 +60,8 @@ codex-runtime-check.md
 ## 当前 runbooks
 
 - `local-systemd-deployment.md` - 本机 `odoo-hedge-dev` gateway/dashboard
-  的 `systemd --user` 部署、状态检查、日志和重启方式。
+  的 `systemd --user` 部署、Slack Socket action forwarder、状态检查、日志和
+  重启方式。
 - `odoo-hedge-dev-profile.md` - profile 配置、隔离 HOME、GitHub CLI 和
   commit 身份约定。
 - `odoo-hedge-workflow-plugin.md` - `odoo-hedge-workflow` plugin 的
