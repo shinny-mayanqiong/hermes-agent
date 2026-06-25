@@ -53,28 +53,22 @@ def test_build_forward_payload_extracts_reference_fields():
     }
 
 
-def test_register_forward_action_handlers_uses_default_action_ids(monkeypatch):
+def test_register_uses_default_action_ids(monkeypatch):
     plugin = _load_plugin()
     monkeypatch.delenv("SLACK_SOCKET_FORWARD_ACTION_IDS", raising=False)
 
     registered = []
 
-    class FakeApp:
-        def action(self, action_id):
-            registered.append(action_id)
+    class FakeCtx:
+        def register_slack_action_handler(self, action_id, callback):
+            registered.append((action_id, callback))
 
-            def decorator(fn):
-                return fn
+    plugin.register(FakeCtx())
 
-            return decorator
-
-    adapter = MagicMock()
-    adapter._app = FakeApp()
-
-    plugin._register_forward_action_handlers(adapter)
-
-    assert registered == ["create_issue", "create_issue_and_pr"]
-    assert adapter._app._slack_socket_forwarder_registered is True
+    assert registered == [
+        ("create_issue", plugin._handle_forward_action),
+        ("create_issue_and_pr", plugin._handle_forward_action),
+    ]
 
 
 @pytest.mark.asyncio

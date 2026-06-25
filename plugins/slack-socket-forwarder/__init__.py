@@ -1,9 +1,4 @@
-"""Forward selected Slack Socket Mode actions to an internal endpoint.
-
-This plugin intentionally patches only SlackAdapter's Socket Mode startup hook.
-It keeps Hermes core unchanged while letting an operator forward specific Block
-Kit button actions such as ``create_issue`` and ``create_issue_and_pr``.
-"""
+"""Forward selected Slack Socket Mode actions to an internal endpoint."""
 
 from __future__ import annotations
 
@@ -17,9 +12,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_FORWARD_URL = "http://192.168.139.8:9000/internal/slack/socket-interactions"
 DEFAULT_ACTION_IDS = ("create_issue", "create_issue_and_pr")
 DEFAULT_TIMEOUT_SECONDS = 10.0
-
-_PATCHED = False
-
 
 def _csv_set(raw: str | None) -> list[str]:
     return [part.strip() for part in str(raw or "").split(",") if part.strip()]
@@ -117,51 +109,16 @@ async def _handle_forward_action(ack, body: dict[str, Any], action: dict[str, An
         )
 
 
-def _register_forward_action_handlers(adapter: Any) -> None:
-    app = getattr(adapter, "_app", None)
-    if app is None:
-        return
-    if getattr(app, "_slack_socket_forwarder_registered", False):
-        return
-
+def register(ctx) -> None:
     action_ids = _configured_action_ids()
     if not action_ids:
         logger.warning("[slack-socket-forwarder] No Slack action IDs configured")
         return
 
     for action_id in action_ids:
-        app.action(action_id)(_handle_forward_action)
+        ctx.register_slack_action_handler(action_id, _handle_forward_action)
 
-    setattr(app, "_slack_socket_forwarder_registered", True)
     logger.info(
         "[slack-socket-forwarder] Registered Slack action forwarders: %s",
         ", ".join(action_ids),
     )
-
-
-def _patch_slack_adapter() -> None:
-    global _PATCHED
-    if _PATCHED:
-        return
-
-    from gateway.platforms.slack import SlackAdapter
-
-    if getattr(SlackAdapter, "_slack_socket_forwarder_patched", False):
-        _PATCHED = True
-        return
-
-    original_start = SlackAdapter._start_socket_mode_handler
-
-    def _start_socket_mode_handler_with_forwarder(self, *args, **kwargs):
-        _register_forward_action_handlers(self)
-        return original_start(self, *args, **kwargs)
-
-    SlackAdapter._start_socket_mode_handler = _start_socket_mode_handler_with_forwarder
-    SlackAdapter._slack_socket_forwarder_patched = True
-    SlackAdapter._slack_socket_forwarder_original_start = original_start
-    _PATCHED = True
-
-
-def register(ctx) -> None:
-    del ctx
-    _patch_slack_adapter()
