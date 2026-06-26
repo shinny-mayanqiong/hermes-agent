@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 
 from gateway.config import Platform
@@ -210,6 +211,17 @@ class FailingAdapter:
         raise RuntimeError("simulated send failure")
 
 
+class SoftFailingAdapter:
+    """Adapter whose send() reports failure without raising."""
+
+    def __init__(self):
+        self.attempts = 0
+
+    async def send(self, chat_id, text, metadata=None):
+        self.attempts += 1
+        return SimpleNamespace(success=False, error="simulated send failure")
+
+
 def test_kanban_notifier_rewinds_claim_on_send_exception(tmp_path, monkeypatch):
     """A raising adapter rewinds the claim so the next tick can retry.
 
@@ -231,6 +243,27 @@ def test_kanban_notifier_rewinds_claim_on_send_exception(tmp_path, monkeypatch):
     # Send was attempted (so we exercised the failure path, not just the
     # disconnect path) and the claim was rewound — the unseen-events query
     # still returns the event for retry on the next tick.
+    assert adapter.attempts >= 1, "send should have been attempted at least once"
+    assert [ev.kind for ev in _unseen_terminal_events(tid)] == ["completed"]
+
+
+def test_kanban_notifier_rewinds_claim_on_send_result_failure(tmp_path, monkeypatch):
+    """Adapters commonly return SendResult(success=False) instead of raising.
+
+    That soft failure must be treated as an undelivered notification; otherwise
+    the notifier advances the cursor, unsubscribes completed tasks, and the
+    human only sees the initial "task started" message.
+    """
+    db_path = tmp_path / "send-result-failure.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    tid = _create_completed_subscription()
+
+    adapter = SoftFailingAdapter()
+    runner = _make_runner(adapter)
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
     assert adapter.attempts >= 1, "send should have been attempted at least once"
     assert [ev.kind for ev in _unseen_terminal_events(tid)] == ["completed"]
 

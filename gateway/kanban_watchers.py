@@ -405,9 +405,21 @@ class GatewayKanbanWatchersMixin:
                             sub["chat_id"], sub.get("thread_id") or "",
                         )
                         try:
-                            await adapter.send(
+                            send_result = await adapter.send(
                                 sub["chat_id"], msg, metadata=metadata,
                             )
+                            if (
+                                send_result is not None
+                                and getattr(send_result, "success", True) is False
+                            ):
+                                raise RuntimeError(
+                                    getattr(
+                                        send_result,
+                                        "error",
+                                        "send returned success=False",
+                                    )
+                                    or "send returned success=False"
+                                )
                             logger.debug(
                                 "kanban notifier: delivered %s event for %s to %s/%s on board %s",
                                 kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
