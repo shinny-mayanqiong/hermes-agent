@@ -1568,6 +1568,27 @@ def _normalized_approval(result: dict[str, Any], *, positive_next_phases: set[st
     return None
 
 
+def _pr_review_notification(metadata: dict[str, Any], task_meta: dict[str, Any]) -> dict[str, Any]:
+    approved = _normalized_approval(metadata, positive_next_phases=set())
+    if approved is True:
+        decision = "approve"
+    elif approved is False:
+        decision = "request changes"
+    else:
+        raw_decision = str(metadata.get("review_decision") or "").strip().replace("_", " ")
+        decision = raw_decision or "unknown"
+
+    pr = task_meta.get("pr") if isinstance(task_meta.get("pr"), dict) else {}
+    link = str(metadata.get("pr_comment_url") or pr.get("url") or "").strip()
+    lines = [f"PR review result: {decision}"]
+    if link:
+        lines.append(f"GitHub: {link}")
+    return {
+        "message": "\n".join(lines),
+        "skip_artifacts": True,
+    }
+
+
 def _should_process_no_next(reason: str) -> bool:
     lowered = reason.casefold()
     if "missing" in lowered:
@@ -2420,6 +2441,8 @@ def run_codex_exec_worker(task_id: str, *, board: str) -> dict[str, Any]:
             reason = "codex exec PR review summary missing required field(s): " + ", ".join(missing)
             _block_current_run(task_id, board=board, run_id=run_id, reason=reason)
             return {"kind": "codex_exec_worker", "task_id": task_id, "status": "blocked", "reason": reason}
+        metadata = dict(metadata)
+        metadata["notification"] = _pr_review_notification(metadata, meta)
 
     ok = _complete_current_run(
         task_id,

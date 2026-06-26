@@ -191,6 +191,38 @@ def test_codex_exec_prompt_includes_pr_review_contract(workflow):
     assert "pr_comment_url" in prompt
 
 
+def test_pr_review_notification_is_decision_and_github_link(workflow):
+    notification = workflow._pr_review_notification(
+        {
+            "approved": False,
+            "review_decision": "changes_requested",
+            "pr_comment_url": "https://github.com/shinnytech/odoo-hedge/pull/1019#issuecomment-1",
+        },
+        {"pr": {"url": "https://github.com/shinnytech/odoo-hedge/pull/1019"}},
+    )
+
+    assert notification == {
+        "message": (
+            "PR review result: request changes\n"
+            "GitHub: https://github.com/shinnytech/odoo-hedge/pull/1019#issuecomment-1"
+        ),
+        "skip_artifacts": True,
+    }
+
+    approved = workflow._pr_review_notification(
+        {
+            "approved": True,
+            "review_decision": "approved",
+            "pr_comment_url": "",
+        },
+        {"pr": {"url": "https://github.com/shinnytech/odoo-hedge/pull/1020"}},
+    )
+    assert approved["message"] == (
+        "PR review result: approve\n"
+        "GitHub: https://github.com/shinnytech/odoo-hedge/pull/1020"
+    )
+
+
 class FakeSlackClient:
     def __init__(self):
         self.messages = []

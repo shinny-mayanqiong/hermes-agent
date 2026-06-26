@@ -15,6 +15,27 @@ class RecordingAdapter:
         self.sent.append({"chat_id": chat_id, "text": text, "metadata": metadata or {}})
 
 
+class RecordingArtifactAdapter(RecordingAdapter):
+    def __init__(self):
+        super().__init__()
+        self.documents = []
+        self.images = []
+        self.videos = []
+
+    def extract_local_files(self, text):
+        del text
+        return [], ""
+
+    async def send_document(self, chat_id, file_path, metadata=None):
+        self.documents.append({"chat_id": chat_id, "file_path": file_path, "metadata": metadata or {}})
+
+    async def send_multiple_images(self, chat_id, images, metadata=None):
+        self.images.append({"chat_id": chat_id, "images": images, "metadata": metadata or {}})
+
+    async def send_video(self, chat_id, video_path, metadata=None):
+        self.videos.append({"chat_id": chat_id, "video_path": video_path, "metadata": metadata or {}})
+
+
 class DisconnectedAdapters(dict):
     """Expose a platform during collection, then simulate disconnect on get()."""
 
@@ -103,6 +124,47 @@ def test_kanban_notifier_claim_prevents_second_watcher_send(tmp_path, monkeypatc
 
     assert len(adapter1.sent) == 1
     assert adapter2.sent == []
+
+
+def test_kanban_notifier_honors_completion_notification_and_skips_artifacts(tmp_path, monkeypatch):
+    db_path = tmp_path / "notification-override.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    artifact = tmp_path / "pr1019_local_code_review_comment.md"
+    artifact.write_text("# Full review already posted to GitHub\n", encoding="utf-8")
+    message = (
+        "PR review result: request changes\n"
+        "GitHub: https://github.com/shinnytech/odoo-hedge/pull/1019#issuecomment-1"
+    )
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="PR #1019: local code review", assignee="worker")
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
+        kb.complete_task(
+            conn,
+            tid,
+            summary="full worker result",
+            metadata={
+                "artifacts": [str(artifact)],
+                "notification": {
+                    "message": message,
+                    "skip_artifacts": True,
+                },
+            },
+        )
+    finally:
+        conn.close()
+
+    adapter = RecordingArtifactAdapter()
+    runner = _make_runner(adapter)
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert adapter.sent == [{"chat_id": "chat-1", "text": message, "metadata": {}}]
+    assert adapter.documents == []
+    assert adapter.images == []
+    assert adapter.videos == []
 
 
 def test_kanban_notifier_rewinds_claim_if_adapter_disconnects(tmp_path, monkeypatch):

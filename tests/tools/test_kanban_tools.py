@@ -431,6 +431,37 @@ def test_complete_with_artifacts_lands_in_event_payload(worker_env):
         conn.close()
 
 
+def test_complete_with_notification_lands_in_event_payload(worker_env):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    message = "PR review result: approve\nGitHub: https://github.com/example/repo/pull/1#issuecomment-2"
+    out = kt._handle_complete({
+        "summary": "full worker handoff",
+        "metadata": {
+            "notification": {
+                "message": message,
+                "skip_artifacts": True,
+                "internal_note": "not promoted",
+            },
+        },
+    })
+    assert json.loads(out)["ok"] is True
+
+    conn = kb.connect()
+    try:
+        events = kb.list_events(conn, worker_env)
+        completed = [e for e in events if e.kind == "completed"]
+        assert len(completed) == 1
+        payload = completed[0].payload or {}
+        assert payload.get("notification") == {
+            "message": message,
+            "skip_artifacts": True,
+        }
+    finally:
+        conn.close()
+
+
 def test_complete_artifacts_accepts_single_string(worker_env):
     """A bare string is auto-promoted to a single-element list for convenience."""
     from hermes_cli import kanban_db as kb

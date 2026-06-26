@@ -3908,6 +3908,16 @@ def complete_task(
                 ]
                 if cleaned_artifacts:
                     completed_payload["artifacts"] = cleaned_artifacts
+            md_notification = metadata.get("notification")
+            if isinstance(md_notification, dict):
+                notification_payload: dict[str, Any] = {}
+                message = md_notification.get("message") or md_notification.get("text")
+                if isinstance(message, str) and message.strip():
+                    notification_payload["message"] = message.strip()[:4000]
+                if "skip_artifacts" in md_notification:
+                    notification_payload["skip_artifacts"] = bool(md_notification.get("skip_artifacts"))
+                if notification_payload:
+                    completed_payload["notification"] = notification_payload
         _append_event(
             conn, task_id, "completed",
             completed_payload,

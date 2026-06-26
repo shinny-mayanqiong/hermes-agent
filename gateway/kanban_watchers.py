@@ -107,6 +107,23 @@ def _release_singleton_lock(handle) -> None:
         pass
 
 
+def _completion_notification(event_payload: Optional[dict]) -> dict[str, Any]:
+    if not isinstance(event_payload, dict):
+        return {}
+    notification = event_payload.get("notification")
+    return notification if isinstance(notification, dict) else {}
+
+
+def _completion_notification_message(event_payload: Optional[dict]) -> str:
+    notification = _completion_notification(event_payload)
+    message = notification.get("message") or notification.get("text")
+    return message.strip() if isinstance(message, str) and message.strip() else ""
+
+
+def _completion_notification_skips_artifacts(event_payload: Optional[dict]) -> bool:
+    return bool(_completion_notification(event_payload).get("skip_artifacts"))
+
+
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
@@ -332,22 +349,26 @@ class GatewayKanbanWatchersMixin:
                             # in the event payload), then fall back to
                             # task.result for legacy rows written before
                             # runs shipped.
-                            handoff = ""
-                            payload_summary = None
-                            if ev.payload and ev.payload.get("summary"):
-                                payload_summary = str(ev.payload["summary"])
-                            if payload_summary:
-                                lines = payload_summary.strip().splitlines()
-                                h = lines[0][:200] if lines else payload_summary[:200]
-                                handoff = f"\n{h}"
-                            elif task and task.result:
-                                lines = task.result.strip().splitlines()
-                                r = lines[0][:160] if lines else task.result[:160]
-                                handoff = f"\n{r}"
-                            msg = (
-                                f"✔ {tag}Kanban {sub['task_id']} done"
-                                f" — {title}{handoff}"
-                            )
+                            custom_msg = _completion_notification_message(ev.payload)
+                            if custom_msg:
+                                msg = custom_msg
+                            else:
+                                handoff = ""
+                                payload_summary = None
+                                if ev.payload and ev.payload.get("summary"):
+                                    payload_summary = str(ev.payload["summary"])
+                                if payload_summary:
+                                    lines = payload_summary.strip().splitlines()
+                                    h = lines[0][:200] if lines else payload_summary[:200]
+                                    handoff = f"\n{h}"
+                                elif task and task.result:
+                                    lines = task.result.strip().splitlines()
+                                    r = lines[0][:160] if lines else task.result[:160]
+                                    handoff = f"\n{r}"
+                                msg = (
+                                    f"✔ {tag}Kanban {sub['task_id']} done"
+                                    f" — {title}{handoff}"
+                                )
                         elif kind == "blocked":
                             reason = ""
                             if ev.payload and ev.payload.get("reason"):
@@ -400,7 +421,10 @@ class GatewayKanbanWatchersMixin:
                             # ``send_document`` / ``send_image_file`` uploads
                             # them. Only fires on the ``completed`` event so
                             # we never spam attachments on retries.
-                            if kind == "completed":
+                            if (
+                                kind == "completed"
+                                and not _completion_notification_skips_artifacts(ev.payload)
+                            ):
                                 try:
                                     await self._deliver_kanban_artifacts(
                                         adapter=adapter,
