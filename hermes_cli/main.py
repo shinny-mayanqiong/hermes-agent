@@ -294,6 +294,7 @@ from hermes_cli.subcommands.prompt_size import build_prompt_size_parser
 from hermes_cli.subcommands.memory import build_memory_parser
 from hermes_cli.subcommands.acp import build_acp_parser
 from hermes_cli.subcommands.tools import build_tools_parser
+from hermes_cli.subcommands.devload import build_devload_parser
 from hermes_cli.subcommands.insights import build_insights_parser
 from hermes_cli.subcommands.skills import build_skills_parser
 from hermes_cli.subcommands.pairing import build_pairing_parser
@@ -11962,6 +11963,12 @@ def cmd_tools(args):
         tools_command(args)
 
 
+def cmd_devload(args):
+    from hermes_cli.devload import run_devload_command
+
+    sys.exit(run_devload_command(args))
+
+
 def cmd_insights(args):
     try:
         from hermes_state import SessionDB
@@ -12462,6 +12469,11 @@ def main():
     # tools command  (parser built in hermes_cli/subcommands/tools.py)
     # =========================================================================
     build_tools_parser(subparsers, cmd_tools=cmd_tools)
+
+    # =========================================================================
+    # devload command  (parser built in hermes_cli/subcommands/devload.py)
+    # =========================================================================
+    build_devload_parser(subparsers, cmd_devload=cmd_devload)
 
     # =========================================================================
     # computer-use command — manage Computer Use (cua-driver) on macOS

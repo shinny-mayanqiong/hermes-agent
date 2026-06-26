@@ -192,6 +192,17 @@ class TestMissingModelSection:
         assert not any("no 'model' section" in i.message for i in issues)
 
 
+class TestDevMachinesValidation:
+    def test_dev_machines_root_key_is_allowed(self):
+        issues = validate_config_structure({
+            "dev_machines": {
+                "hedge-a": "hedge-a",
+            },
+        })
+
+        assert issues == []
+
+
 class TestConfigIssueDataclass:
     """ConfigIssue should be a proper dataclass."""
 
