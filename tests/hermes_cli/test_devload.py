@@ -81,13 +81,17 @@ class TestDevloadConfig:
 
 
 class TestDevloadCommand:
-    def test_json_output_reports_load_cpu_and_memory(self, capsys):
+    def test_json_output_reports_load_cpu_memory_and_disk(self, capsys):
         config = {"dev_machines": {"hedge-a": "hedge-a"}}
         stdout = (
             "loadavg=2.00 1.00 0.50 1/100 123\n"
             "cpus=4\n"
             "mem_total_kb=1048576\n"
             "mem_available_kb=524288\n"
+            "disk_total_kb=20971520\n"
+            "disk_used_kb=5242880\n"
+            "disk_free_kb=15728640\n"
+            "disk_used_pct=25\n"
         )
 
         with patch("hermes_cli.config.load_config", return_value=config), patch(
@@ -109,13 +113,23 @@ class TestDevloadCommand:
         assert machine["mem_total_mb"] == 1024
         assert machine["mem_used_mb"] == 512
         assert machine["mem_used_pct"] == 50.0
+        assert machine["disk_total_gb"] == 20.0
+        assert machine["disk_used_gb"] == 5.0
+        assert machine["disk_free_gb"] == 15.0
+        assert machine["disk_used_pct"] == 25.0
         ssh_cmd = run_mock.call_args.args[0]
         assert ssh_cmd[:5] == ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
         assert ssh_cmd[-2] == "hedge-a"
 
     def test_table_output_is_default(self, capsys):
         config = {"dev_machines": {"hedge-a": "hedge-a"}}
-        stdout = "loadavg=0.10 0.20 0.30 1/100 123\ncpus=2\n"
+        stdout = (
+            "loadavg=0.10 0.20 0.30 1/100 123\n"
+            "cpus=2\n"
+            "disk_total_kb=10485760\n"
+            "disk_free_kb=6291456\n"
+            "disk_used_pct=40%\n"
+        )
 
         with patch("hermes_cli.config.load_config", return_value=config), patch(
             "subprocess.run",
@@ -128,6 +142,30 @@ class TestDevloadCommand:
         assert "Development machine load" in out
         assert "hedge-a" in out
         assert "0.10/0.20/0.30" in out
+        assert "Disk /" in out
+        assert "6.0/10.0GB free 40.0% used" in out
+
+    def test_missing_disk_output_is_allowed(self, capsys):
+        config = {"dev_machines": {"hedge-a": "hedge-a"}}
+        stdout = (
+            "loadavg=0.10 0.20 0.30 1/100 123\n"
+            "cpus=2\n"
+            "mem_total_kb=1048576\n"
+            "mem_available_kb=786432\n"
+        )
+
+        with patch("hermes_cli.config.load_config", return_value=config), patch(
+            "subprocess.run",
+            return_value=_completed(stdout),
+        ):
+            rc = run_devload_command(_args())
+
+        assert rc == 0
+        machine = json.loads(capsys.readouterr().out)["machines"][0]
+        assert machine["disk_total_gb"] is None
+        assert machine["disk_used_gb"] is None
+        assert machine["disk_free_gb"] is None
+        assert machine["disk_used_pct"] is None
 
     def test_ssh_failure_returns_partial_failure(self, capsys):
         config = {"dev_machines": {"hedge-a": "hedge-a"}}

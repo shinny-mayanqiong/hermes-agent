@@ -29,6 +29,7 @@ hermes devload --json || /home/user/Repos/hermes-agent/.venv/bin/hermes devload 
    - call out machines with `status: "error"` first;
    - prefer machines with `status: "ok"` and the lowest `load1_per_cpu`;
    - mention memory pressure when `mem_used_pct` is high;
+   - mention system disk pressure when `disk_free_gb` is low or `disk_used_pct` is high;
    - if all machines are busy, say that clearly.
 
 Do not use a `/devload` slash command; this feature is exposed as the top-level

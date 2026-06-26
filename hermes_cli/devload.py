@@ -27,6 +27,15 @@ awk '
   /^MemTotal:/ {print "mem_total_kb="$2}
   /^MemAvailable:/ {print "mem_available_kb="$2}
 ' /proc/meminfo 2>/dev/null || true
+df -Pk / 2>/dev/null | awk '
+  NR == 2 {
+    print "disk_total_kb="$2
+    print "disk_used_kb="$3
+    print "disk_free_kb="$4
+    gsub("%", "", $5)
+    print "disk_used_pct="$5
+  }
+' || true
 """
 
 
@@ -58,6 +67,10 @@ class DevloadResult:
     mem_total_mb: int | None = None
     mem_used_mb: int | None = None
     mem_used_pct: float | None = None
+    disk_total_gb: float | None = None
+    disk_used_gb: float | None = None
+    disk_free_gb: float | None = None
+    disk_used_pct: float | None = None
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -75,6 +88,10 @@ class DevloadResult:
             "mem_total_mb": self.mem_total_mb,
             "mem_used_mb": self.mem_used_mb,
             "mem_used_pct": self.mem_used_pct,
+            "disk_total_gb": self.disk_total_gb,
+            "disk_used_gb": self.disk_used_gb,
+            "disk_free_gb": self.disk_free_gb,
+            "disk_used_pct": self.disk_used_pct,
             "error": self.error,
         }
 
@@ -197,7 +214,17 @@ def build_payload(results: list[DevloadResult]) -> dict[str, Any]:
 
 
 def format_results_table(results: list[DevloadResult]) -> str:
-    headers = ["Machine", "Target", "Status", "Load 1/5/15", "CPU", "Load/CPU", "Mem", "Error"]
+    headers = [
+        "Machine",
+        "Target",
+        "Status",
+        "Load 1/5/15",
+        "CPU",
+        "Load/CPU",
+        "Mem",
+        "Disk /",
+        "Error",
+    ]
     rows = [
         [
             result.label if result.label != result.name else result.name,
@@ -207,6 +234,7 @@ def format_results_table(results: list[DevloadResult]) -> str:
             str(result.cpus) if result.cpus is not None else "-",
             f"{result.load1_per_cpu:.2f}" if result.load1_per_cpu is not None else "-",
             _format_memory(result),
+            _format_disk(result),
             result.error or "",
         ]
         for result in results
@@ -325,6 +353,22 @@ def _parse_probe_output(machine: DevMachine, output: str) -> DevloadResult:
         mem_used_mb = round(used_kb / 1024)
         mem_used_pct = round((used_kb / total_kb) * 100, 1)
 
+    disk_total_kb = _parse_optional_int(values.get("disk_total_kb"))
+    disk_used_kb = _parse_optional_int(values.get("disk_used_kb"))
+    disk_free_kb = _parse_optional_int(values.get("disk_free_kb"))
+    disk_used_pct = _parse_optional_float(values.get("disk_used_pct"))
+    disk_total_gb: float | None = None
+    disk_used_gb: float | None = None
+    disk_free_gb: float | None = None
+    if disk_total_kb and disk_total_kb > 0:
+        disk_total_gb = _kb_to_gb(disk_total_kb)
+        if disk_used_kb is not None:
+            disk_used_gb = _kb_to_gb(max(0, disk_used_kb))
+        if disk_free_kb is not None:
+            disk_free_gb = _kb_to_gb(max(0, disk_free_kb))
+        if disk_used_pct is None and disk_used_kb is not None:
+            disk_used_pct = round((disk_used_kb / disk_total_kb) * 100, 1)
+
     status = _status(load1_per_cpu=load1_per_cpu, mem_used_pct=mem_used_pct)
     return DevloadResult(
         name=machine.name,
@@ -340,6 +384,10 @@ def _parse_probe_output(machine: DevMachine, output: str) -> DevloadResult:
         mem_total_mb=mem_total_mb,
         mem_used_mb=mem_used_mb,
         mem_used_pct=mem_used_pct,
+        disk_total_gb=disk_total_gb,
+        disk_used_gb=disk_used_gb,
+        disk_free_gb=disk_free_gb,
+        disk_used_pct=disk_used_pct,
     )
 
 
@@ -370,6 +418,20 @@ def _parse_optional_int(raw: str | None) -> int | None:
         return int(str(raw).strip())
     except ValueError:
         return None
+
+
+def _parse_optional_float(raw: str | None) -> float | None:
+    if raw is None or str(raw).strip() == "":
+        return None
+    cleaned = str(raw).strip().removesuffix("%")
+    try:
+        return round(float(cleaned), 1)
+    except ValueError:
+        return None
+
+
+def _kb_to_gb(value: int) -> float:
+    return round(value / 1024 / 1024, 1)
 
 
 def _coerce_optional_port(raw: Any, label: str) -> int | None:
@@ -418,6 +480,17 @@ def _format_memory(result: DevloadResult) -> str:
     ):
         return "-"
     return f"{result.mem_used_mb}/{result.mem_total_mb}MB {result.mem_used_pct:.1f}%"
+
+
+def _format_disk(result: DevloadResult) -> str:
+    if result.disk_free_gb is None:
+        return "-"
+    if result.disk_total_gb is None or result.disk_used_pct is None:
+        return f"{result.disk_free_gb:.1f}GB free"
+    return (
+        f"{result.disk_free_gb:.1f}/{result.disk_total_gb:.1f}GB free "
+        f"{result.disk_used_pct:.1f}% used"
+    )
 
 
 def _error_result(machine: DevMachine, error: str) -> DevloadResult:

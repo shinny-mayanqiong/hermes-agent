@@ -13,7 +13,8 @@ def build_devload_parser(subparsers, *, cmd_devload: Callable) -> None:
         help="Show load for configured development machines",
         description=(
             "Query development machines declared in config.yaml under "
-            "dev_machines and report current load, CPU count, and memory use."
+            "dev_machines and report current load, CPU count, memory use, "
+            "and system disk free space."
         ),
     )
     parser.add_argument(
