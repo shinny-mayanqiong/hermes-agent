@@ -16,10 +16,12 @@ is free, where to run tests, or whether the dev fleet is under pressure.
 
 ## Procedure
 
-1. Run:
+1. Run the devload command from the active Hermes checkout. Prefer the installed
+   `hermes` command when it is available on `PATH`; in service/gateway contexts,
+   use the checkout's venv entrypoint if the bare command is unavailable.
 
 ```bash
-hermes devload --json
+hermes devload --json || /home/user/Repos/hermes-agent/.venv/bin/hermes devload --json
 ```
 
 2. Read the JSON results.
