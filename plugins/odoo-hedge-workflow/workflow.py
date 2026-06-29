@@ -24,6 +24,7 @@ PR_REVIEW_DEFAULT_REPO = "/home/user/Repos/odoo-hedge"
 PR_REVIEW_DEFAULT_BOARD = "odoo-hedge-dev"
 PR_REVIEW_DEFAULT_REPO_SLUG = "shinnytech/odoo-hedge"
 PR_REVIEW_ENTRY = "pr_review"
+PR_REVIEW_BRANCH_PREFIX = "codex/pr-review-"
 
 ORCHESTRATOR = "odoo-hedge-orchestrator"
 SPEC = "odoo-hedge-spec"
@@ -2348,6 +2349,121 @@ def _complete_current_run(
         )
 
 
+def _run_cleanup_command(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[bool, str]:
+    proc = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    detail = (proc.stderr or proc.stdout or "").strip()
+    return proc.returncode == 0, detail
+
+
+def _cleanup_pr_review_worktree(meta: dict[str, Any]) -> dict[str, Any]:
+    """Remove local-only resources for one-shot PR review tasks.
+
+    PR review worktrees are disposable: the durable review artifact is the
+    GitHub PR comment URL returned in the worker JSON. Keep the cleanup tightly
+    scoped to plugin-created ``codex/pr-review-*`` branches so issue delivery
+    worktrees cannot be removed through malformed metadata.
+    """
+    branch = str(meta.get("branch") or "").strip()
+    repo_raw = str(meta.get("repo") or "").strip()
+    worktree_raw = str(meta.get("worktree") or "").strip()
+    result: dict[str, Any] = {
+        "attempted": False,
+        "ok": False,
+        "repo": repo_raw,
+        "worktree": worktree_raw,
+        "branch": branch,
+        "script": "",
+        "removed_worktree": False,
+        "deleted_branch": False,
+        "errors": [],
+    }
+
+    if not branch.startswith(PR_REVIEW_BRANCH_PREFIX):
+        result["reason"] = "branch is not a PR review branch"
+        return result
+    if not repo_raw:
+        result["reason"] = "missing repo path"
+        return result
+    if not worktree_raw:
+        result["reason"] = "missing worktree path"
+        return result
+
+    repo = Path(repo_raw).expanduser().resolve()
+    worktree = Path(worktree_raw).expanduser().resolve()
+    result["repo"] = str(repo)
+    result["worktree"] = str(worktree)
+    result["attempted"] = True
+
+    if not repo.is_dir():
+        result["errors"].append(f"repo path does not exist: {repo}")
+        return result
+
+    if worktree.exists():
+        script = repo / "scripts" / "codex-worktree.sh"
+        result["script"] = str(script)
+        if not script.exists():
+            result["errors"].append(f"worktree cleanup script not found: {script}")
+            return result
+        cleanup_env = dict(os.environ)
+        cleanup_env["WORKTREE_ROOT"] = str(worktree.parent)
+        ok, detail = _run_cleanup_command(
+            [str(script), "remove", branch, "--force", "--purge-db", "--yes"],
+            cwd=repo,
+            env=cleanup_env,
+        )
+        if not worktree.exists():
+            result["removed_worktree"] = True
+        if not ok:
+            result["errors"].append(detail or f"worktree cleanup script failed for {worktree}")
+        elif not result["removed_worktree"]:
+            result["errors"].append(
+                f"worktree cleanup script completed but worktree still exists: {worktree}"
+            )
+    else:
+        result["removed_worktree"] = True
+
+    ok, detail = _run_cleanup_command(["git", "-C", str(repo), "worktree", "prune"])
+    if not ok:
+        result["errors"].append(detail or "git worktree prune failed")
+
+    branch_ref = f"refs/heads/{branch}"
+    branch_exists, _ = _run_cleanup_command(
+        ["git", "-C", str(repo), "show-ref", "--verify", "--quiet", branch_ref]
+    )
+    if branch_exists:
+        ok, detail = _run_cleanup_command(["git", "-C", str(repo), "branch", "-D", branch])
+        if ok:
+            result["deleted_branch"] = True
+        else:
+            result["errors"].append(detail or f"git branch -D failed for {branch}")
+    else:
+        result["deleted_branch"] = True
+
+    result["ok"] = not result["errors"]
+    if result["ok"]:
+        result["reason"] = "removed local PR review worktree and branch"
+    return result
+
+
+def _finalize_pr_review_metadata(metadata: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    finalized = dict(metadata)
+    finalized["notification"] = _pr_review_notification(finalized, meta)
+    finalized["pr_review_cleanup"] = _cleanup_pr_review_worktree(meta)
+    return finalized
+
+
 def run_codex_exec_worker(task_id: str, *, board: str) -> dict[str, Any]:
     with kb.connect_closing(board=board) as conn:
         task = _load_task(conn, task_id)
@@ -2441,8 +2557,7 @@ def run_codex_exec_worker(task_id: str, *, board: str) -> dict[str, Any]:
             reason = "codex exec PR review summary missing required field(s): " + ", ".join(missing)
             _block_current_run(task_id, board=board, run_id=run_id, reason=reason)
             return {"kind": "codex_exec_worker", "task_id": task_id, "status": "blocked", "reason": reason}
-        metadata = dict(metadata)
-        metadata["notification"] = _pr_review_notification(metadata, meta)
+        metadata = _finalize_pr_review_metadata(metadata, meta)
 
     ok = _complete_current_run(
         task_id,

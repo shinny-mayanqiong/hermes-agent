@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -189,6 +190,80 @@ def test_codex_exec_prompt_includes_pr_review_contract(workflow):
     assert "https://github.com/shinnytech/odoo-hedge/pull/42" in prompt
     assert "只做 review，不修改代码、不提交、不 push、不创建 PR" in prompt
     assert "pr_comment_url" in prompt
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+
+def test_cleanup_pr_review_worktree_removes_local_worktree_and_branch(workflow, tmp_path):
+    repo = tmp_path / "repo"
+    branch = "codex/pr-review-42-abcdef123456"
+    worktree = tmp_path / branch.replace("/", "-")
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "checkout", "-b", "master")
+    (repo / "README.md").write_text("seed\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init")
+    scripts_dir = repo / "scripts"
+    scripts_dir.mkdir()
+    cleanup_script = scripts_dir / "codex-worktree.sh"
+    cleanup_script.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                'branch="$2"',
+                'safe="${branch//\\//-}"',
+                'git -C "$(pwd)" worktree remove --force "${WORKTREE_ROOT}/${safe}"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cleanup_script.chmod(0o755)
+
+    _git(repo, "worktree", "add", "-b", branch, str(worktree), "HEAD")
+    (worktree / "local-review-note.txt").write_text("discard me\n", encoding="utf-8")
+
+    result = workflow._cleanup_pr_review_worktree(
+        {
+            "repo": str(repo),
+            "worktree": str(worktree),
+            "branch": branch,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["script"] == str(cleanup_script)
+    assert result["removed_worktree"] is True
+    assert result["deleted_branch"] is True
+    assert not worktree.exists()
+    assert branch not in _git(repo, "branch", "--list", branch).stdout
+    assert str(worktree) not in _git(repo, "worktree", "list").stdout
+
+
+def test_cleanup_pr_review_worktree_rejects_non_pr_review_branch(workflow, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = workflow._cleanup_pr_review_worktree(
+        {
+            "repo": str(repo),
+            "worktree": str(tmp_path / "worktree"),
+            "branch": "codex/issue-42-real-work",
+        }
+    )
+
+    assert result["attempted"] is False
+    assert result["ok"] is False
+    assert result["reason"] == "branch is not a PR review branch"
 
 
 def test_pr_review_notification_is_decision_and_github_link(workflow):
