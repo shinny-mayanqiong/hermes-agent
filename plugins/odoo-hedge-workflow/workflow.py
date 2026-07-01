@@ -97,6 +97,8 @@ PHASE_OUTPUT_EXTRAS = {
     "spec_blueprint_review": {
         "approved": True,
         "review_decision": "approved|changes_requested",
+        "workflow_next_action": "proceed_to_implementation|return_to_spec_freeze|return_to_blueprint_prompts",
+        "next_recommended_phase": "implementation|spec_freeze|blueprint_prompts",
         "return_phase": "blueprint_prompts",
         "review_summary": "",
         "ui_ux_impact": "",
@@ -206,8 +208,10 @@ PHASE_INSTRUCTIONS = {
         "如果发现需求定义不清、步骤缺失、验收不可执行、实现顺序风险高或与 odoo-hedge repo 约束冲突，设置 approved=false，并在 blocking_findings 中给出必须修正的问题。",
         "如果存在用户可见变化但 UI/UX impact 未说明或无法验证，设置 approved=false，除非能明确证明该遗漏不影响实现和验收。",
         "如果只有不影响开发启动的优化建议，可以设置 approved=true，并把建议放入 non_blocking_findings。",
-        "review 结论必须包含 review_summary、ui_ux_impact、clarity_findings、step_findings、blocking_findings、non_blocking_findings、approved 和 review_decision。",
-        "approved=false 时必须设置 return_phase；如果是需求/spec 问题，return_phase=spec_freeze；如果是执行工件/步骤问题，return_phase=blueprint_prompts。",
+        "review 结论必须明确说明是否通过：approved 必须是 JSON boolean true 或 false，review_decision 必须是 approved 或 changes_requested。",
+        "必须写明下一步自动化动作：approved=true 时 workflow_next_action=proceed_to_implementation 且 next_recommended_phase=implementation。",
+        "approved=false 时必须设置 return_phase、workflow_next_action 和 next_recommended_phase；如果是需求/spec 问题，return_phase=spec_freeze、workflow_next_action=return_to_spec_freeze、next_recommended_phase=spec_freeze；如果是执行工件/步骤问题，return_phase=blueprint_prompts、workflow_next_action=return_to_blueprint_prompts、next_recommended_phase=blueprint_prompts。",
+        "review 结论必须包含 review_summary、ui_ux_impact、clarity_findings、step_findings、blocking_findings、non_blocking_findings、approved、review_decision、workflow_next_action 和 next_recommended_phase。",
     ],
     "branch_sync_repair": [
         "本阶段目标是修复 PR branch 与 base branch 的可合并状态，不是普通 CI 观察。",
@@ -1633,6 +1637,37 @@ def _needs_branch_sync(result: dict[str, Any]) -> bool:
     )
 
 
+def _spec_blueprint_review_contract_issue(result: dict[str, Any], approved: bool) -> str | None:
+    review_decision = str(result.get("review_decision") or "").strip()
+    next_action = str(result.get("workflow_next_action") or "").strip()
+    next_phase = str(result.get("next_recommended_phase") or "").strip()
+    if not review_decision:
+        return "spec_blueprint_review result missing review_decision"
+    if not next_action:
+        return "spec_blueprint_review result missing workflow_next_action"
+    if not next_phase:
+        return "spec_blueprint_review result missing next_recommended_phase"
+
+    normalized_action = next_action.casefold()
+    normalized_phase = next_phase.casefold()
+    if approved:
+        if normalized_action != "proceed_to_implementation":
+            return "spec_blueprint_review approved=true requires workflow_next_action=proceed_to_implementation"
+        if normalized_phase not in {"implementation", "coder_implementation"}:
+            return "spec_blueprint_review approved=true requires next_recommended_phase=implementation"
+        return None
+
+    return_phase = str(result.get("return_phase") or "").strip()
+    if return_phase not in {"spec_freeze", "blueprint_prompts"}:
+        return "spec_blueprint_review approved=false requires return_phase=spec_freeze or blueprint_prompts"
+    expected_action = f"return_to_{return_phase}"
+    if normalized_action != expected_action:
+        return f"spec_blueprint_review approved=false requires workflow_next_action={expected_action}"
+    if normalized_phase != return_phase:
+        return f"spec_blueprint_review approved=false requires next_recommended_phase={return_phase}"
+    return None
+
+
 def _next_from_child(child: kb.Task) -> tuple[str | None, int, str]:
     meta = _task_meta(child)
     phase = meta.get("phase")
@@ -1655,8 +1690,14 @@ def _next_from_child(child: kb.Task) -> tuple[str | None, int, str]:
     if phase == "spec_blueprint_review":
         approved = _normalized_approval(result, positive_next_phases={"implementation", "coder_implementation"})
         if approved is True:
+            contract_issue = _spec_blueprint_review_contract_issue(result, True)
+            if contract_issue:
+                return None, iteration, contract_issue
             return "implementation", iteration, "spec/blueprint review approved"
         if approved is False:
+            contract_issue = _spec_blueprint_review_contract_issue(result, False)
+            if contract_issue:
+                return None, iteration, contract_issue
             return_phase = result.get("return_phase") or "blueprint_prompts"
             if return_phase not in {"spec_freeze", "blueprint_prompts"}:
                 return_phase = "blueprint_prompts"

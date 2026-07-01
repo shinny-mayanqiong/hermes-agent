@@ -7,6 +7,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -100,6 +101,84 @@ def _complete(task_id: str, result: dict) -> None:
             summary=f"{result.get('phase')} done",
             metadata=result,
         )
+
+
+def test_spec_blueprint_review_output_contract_requires_next_action(workflow):
+    example = workflow._phase_output_example(
+        {"workflow_id": "issue-955"},
+        "spec_blueprint_review",
+        1,
+    )
+
+    assert example["approved"] is True
+    assert example["review_decision"] == "approved|changes_requested"
+    assert (
+        example["workflow_next_action"]
+        == "proceed_to_implementation|return_to_spec_freeze|return_to_blueprint_prompts"
+    )
+    assert example["next_recommended_phase"] == "implementation|spec_freeze|blueprint_prompts"
+
+
+def _phase_child(phase: str, result: dict, *, iteration: int = 1):
+    body = json.dumps(
+        {
+            "workflow_type": "odoo_hedge_dynamic_delivery_v1",
+            "workflow_id": "issue-955",
+            "phase": phase,
+            "iteration": iteration,
+        },
+        ensure_ascii=False,
+    )
+    return SimpleNamespace(body=body, result=json.dumps(result, ensure_ascii=False))
+
+
+def test_spec_blueprint_review_missing_next_action_does_not_advance(workflow):
+    child = _phase_child(
+        "spec_blueprint_review",
+        {
+            "workflow_id": "issue-955",
+            "phase": "spec_blueprint_review",
+            "iteration": 1,
+            "status": "done",
+            "approved": True,
+            "review_decision": "approved",
+            "next_recommended_phase": "implementation",
+        },
+    )
+
+    next_phase, iteration, reason = workflow._next_from_child(child)
+
+    assert next_phase is None
+    assert iteration == 1
+    assert reason == "spec_blueprint_review result missing workflow_next_action"
+
+
+def test_spec_blueprint_review_full_contract_advances_to_implementation(workflow):
+    child = _phase_child(
+        "spec_blueprint_review",
+        {
+            "workflow_id": "issue-955",
+            "phase": "spec_blueprint_review",
+            "iteration": 1,
+            "status": "done",
+            "approved": True,
+            "review_decision": "approved",
+            "workflow_next_action": "proceed_to_implementation",
+            "next_recommended_phase": "implementation",
+            "review_summary": "spec and blueprint are implementable",
+            "ui_ux_impact": "no visible UI change",
+            "clarity_findings": [],
+            "step_findings": [],
+            "blocking_findings": [],
+            "non_blocking_findings": [],
+        },
+    )
+
+    assert workflow._next_from_child(child) == (
+        "implementation",
+        1,
+        "spec/blueprint review approved",
+    )
 
 
 def test_start_notification_subscribes_root_thread_without_replaying_history(
