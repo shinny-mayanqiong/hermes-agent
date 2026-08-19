@@ -25,6 +25,10 @@ _SENSITIVE_INPUT_PREFIX = (
     "copy them into logs, files, or memory; the user text follows.]\n\n"
 )
 _SENSITIVE_REPLY_PLACEHOLDER = "[sensitive evaluation-deployment thread message]"
+_AUTHORITATIVE_BROKER_JSON_MARKER = (
+    "[Authoritative broker_json extracted verbatim from exactly one Slack "
+    "code block; content follows unchanged.]\n"
+)
 
 _STATE_LOCK = asyncio.Lock()
 
@@ -216,7 +220,66 @@ def _sensitive_agent_text(text: str) -> str:
     return f"{_SENSITIVE_INPUT_PREFIX}{text}"
 
 
-def _thread_channel_prompt(record: dict[str, Any]) -> str:
+def _render_slack_preformatted_content(element: dict[str, Any]) -> str:
+    """Reassemble a Slack preformatted block without mrkdwn wrappers."""
+
+    def _render(elements: Any) -> str:
+        if not isinstance(elements, list):
+            return ""
+        pieces: list[str] = []
+        for child in elements:
+            if not isinstance(child, dict):
+                continue
+            child_type = child.get("type")
+            if child_type == "text":
+                pieces.append(str(child.get("text") or ""))
+            elif child_type == "link":
+                # Slack sometimes tokenizes a URI even inside a preformatted
+                # block. Its text is the exact user-visible token; fall back
+                # to the URL when Slack omits that field.
+                pieces.append(str(child.get("text") or child.get("url") or ""))
+            elif child_type in {"rich_text_section", "rich_text_preformatted"}:
+                pieces.append(_render(child.get("elements")))
+        return "".join(pieces)
+
+    return _render(element.get("elements"))
+
+
+def _valid_broker_json_code_blocks(event: Any) -> list[str]:
+    """Return exact Slack code-block contents that are top-level JSON arrays."""
+    raw = _raw_dict(event)
+    blocks = raw.get("blocks")
+    if not isinstance(blocks, list):
+        return []
+
+    candidates: list[str] = []
+
+    def _walk(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                _walk(item)
+            return
+        if not isinstance(value, dict):
+            return
+        if value.get("type") == "rich_text_preformatted":
+            content = _render_slack_preformatted_content(value)
+            try:
+                parsed = json.loads(content)
+            except (TypeError, json.JSONDecodeError):
+                return
+            if isinstance(parsed, list):
+                candidates.append(content)
+            return
+        _walk(value.get("elements"))
+
+    _walk(blocks)
+    return candidates
+
+
+def _thread_channel_prompt(
+    record: dict[str, Any],
+    broker_code_block_count: int,
+) -> str:
     requester = _format_user(str(record.get("user_name") or ""), str(record.get("user_id") or ""))
     return "\n".join(
         [
@@ -224,14 +287,23 @@ def _thread_channel_prompt(record: dict[str, Any]) -> str:
             "This thread was opened by /hedge-evaluation-deploy. Treat its messages as fixed evaluation-environment requests.",
             f"Slack requester: {requester}. Only this requester may confirm deployment or cancellation unless they delegate explicitly.",
             "broker.json is sensitive: do not echo raw JSON or credentials, and do not deliberately copy them to thread state, files, or memory.",
+            "Accept broker.json only from exactly one Slack code block in the current message. Plain JSON, command arguments, and multiple code blocks are not deployment payloads.",
+            f"Valid top-level JSON-array code blocks in the current message: {broker_code_block_count}.",
             "Users do not need to repeat /hedge-evaluation-deploy in this thread.",
         ]
     )
 
 
 def _apply_thread_context(event: Any, record: dict[str, Any]) -> None:
+    broker_code_blocks = _valid_broker_json_code_blocks(event)
     try:
-        event.text = _sensitive_agent_text(str(getattr(event, "text", "") or ""))
+        raw_text = str(getattr(event, "text", "") or "")
+        if len(broker_code_blocks) == 1:
+            raw_text = (
+                f"{_AUTHORITATIVE_BROKER_JSON_MARKER}"
+                f"{broker_code_blocks[0]}"
+            )
+        event.text = _sensitive_agent_text(raw_text)
     except Exception:
         pass
     try:
@@ -243,7 +315,7 @@ def _apply_thread_context(event: Any, record: dict[str, Any]) -> None:
         event.auto_skill = _merge_auto_skill(getattr(event, "auto_skill", None))
     except Exception:
         pass
-    prompt = _thread_channel_prompt(record)
+    prompt = _thread_channel_prompt(record, len(broker_code_blocks))
     try:
         existing = str(getattr(event, "channel_prompt", "") or "").strip()
         event.channel_prompt = f"{existing}\n\n{prompt}" if existing else prompt
@@ -306,7 +378,7 @@ def _format_thread_prompt(record: dict[str, Any]) -> str:
     requester = _format_user(str(record.get("user_name") or ""), str(record.get("user_id") or ""))
     return "\n".join(
         [
-            "请在此 thread 粘贴完整 broker.json 数组，或逐项提供 broker、seat、endpoint 和 trading_fronts。",
+            "请在此 thread 用一个代码块提交完整 broker.json 数组；代码块以外的 JSON 不会用于部署。",
             f"当前发起人：{requester}",
             "也可以直接询问测评环境状态、验证结果或 operation 状态。",
             "系统会先给出脱敏摘要；只有发起人随后回复 `确认部署测评环境` 才会开始部署。",
@@ -422,8 +494,8 @@ def _pre_gateway_dispatch(event: Any, gateway: Any, **_: Any) -> dict[str, str] 
 def _usage(raw_args: str) -> str:
     del raw_args
     return (
-        "Usage: `/hedge-evaluation-deploy [broker.json JSON | 状态 | 验证 | operation ID]`\n"
-        "Slack 中会创建专用 thread，自动收集并校验 broker.json，脱敏展示后等待发起人明确确认，再调用测评环境部署 MCP。"
+        "Usage: `/hedge-evaluation-deploy [状态 | 验证 | operation ID]`\n"
+        "部署时会创建专用 thread；请在 thread 中用恰好一个代码块提交 broker.json，脱敏展示后等待发起人明确确认，再调用测评环境部署 MCP。"
     )
 
 
@@ -432,7 +504,7 @@ def register(ctx) -> None:
         COMMAND_NAME,
         _usage,
         description="Start a Hedge evaluation deployment Slack workflow",
-        args_hint="[broker.json JSON | 状态 | 验证 | operation ID]",
+        args_hint="[状态 | 验证 | operation ID]",
         platforms=("slack",),
     )
     ctx.register_hook("pre_gateway_dispatch", _pre_gateway_dispatch)

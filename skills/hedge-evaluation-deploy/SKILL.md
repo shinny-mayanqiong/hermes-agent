@@ -59,10 +59,19 @@ it.
 
 ## Collect `broker.json`
 
-Accept either a complete pasted JSON array or conversational field-by-field
-input. If an attachment is not readable, ask the user to paste its JSON text.
-When collecting interactively, ask one concise question at a time and preserve
-all brokers, seats, endpoints, and trading fronts supplied by the user.
+In Slack, accept `broker.json` only from a message containing exactly one code
+block whose complete content is a valid top-level JSON array. Do not deploy
+from plain pasted JSON, slash-command arguments, attachments, conversational
+field-by-field input, or a message containing multiple valid JSON-array code
+blocks. Ask the requester to resubmit those inputs as one code block.
+
+The Slack workflow extracts `rich_text_preformatted` content before mrkdwn
+auto-linking. When the current message says it contains exactly one valid code
+block and includes the `Authoritative broker_json` marker, use only the content
+after that marker. Preserve it exactly: do not remove `<` or `>`, unwrap links,
+reformat strings, merge a duplicate Slack rendering, or infer missing values.
+If the authoritative content is invalid, report the real validation problem and
+ask for a corrected single code block.
 
 Validate this shape without inventing missing values:
 
@@ -103,9 +112,10 @@ Apply these checks before asking for confirmation:
 6. Reject comments, trailing commas, placeholder secrets, and fields inferred
    from examples. Ask the user to correct them.
 
-Do not treat an empty array as an ordinary deployment. Ask whether the user is
-intentionally clearing all broker configuration, explain the impact, and still
-require the normal separate confirmation if the control plane supports it.
+The control plane accepts an empty array. Do not treat it as an ordinary
+deployment: ask whether the user is intentionally clearing all broker
+configuration, explain the impact, and require the normal separate
+confirmation.
 
 ## Confirm the Current Payload
 
@@ -131,7 +141,8 @@ reuse confirmation from another payload or another Slack user.
 1. Call `evaluation_healthz`. Stop on an unhealthy registry or worker.
 2. Check recent operations. If another deployment is queued or running, report
    its operation ID and ask whether to wait; do not submit a duplicate.
-3. Collect and validate the complete `broker_json` array.
+3. Collect the complete `broker_json` array from exactly one Slack code block
+   and validate its authoritative content without rewriting it.
 4. Show the redacted summary and obtain the separate confirmation above.
 5. Call `deploy_evaluation_environment` exactly once with
    `broker_json=<validated array>`.

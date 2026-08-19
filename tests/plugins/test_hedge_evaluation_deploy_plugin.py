@@ -105,6 +105,10 @@ def test_skill_defines_sensitive_confirmed_mcp_workflow():
     assert "ctp_auth_code" in skill
     assert "Never paste it back" in skill
     assert "call a memory tool" in skill
+    assert "exactly one Slack code block" in skill
+    assert "Authoritative broker_json" in skill
+    assert "Preserve it exactly" in skill
+    assert "The control plane accepts an empty array" in skill
     for tool_name in (
         "evaluation_healthz",
         "check_evaluation_environment_status",
@@ -116,6 +120,56 @@ def test_skill_defines_sensitive_confirmed_mcp_workflow():
         "cancel_evaluation_operation",
     ):
         assert f"`{tool_name}`" in skill
+
+
+def test_extracts_broker_json_verbatim_from_one_slack_code_block():
+    plugin = _load_plugin()
+    code_content = (
+        '[{"trading_fronts":["tcp://front.example:41205"],'
+        '"literal":"<keep-this>"}]\n'
+    )
+    event = _event("Slack plain text contains <tcp://front.example:41205>")
+    event.raw_message["blocks"] = [
+        {
+            "type": "rich_text",
+            "elements": [
+                {
+                    "type": "rich_text_preformatted",
+                    "elements": [
+                        {"type": "text", "text": code_content},
+                    ],
+                }
+            ],
+        }
+    ]
+
+    blocks = plugin._valid_broker_json_code_blocks(event)
+
+    assert blocks == [code_content]
+
+
+def test_plain_json_and_multiple_code_blocks_are_not_authoritative():
+    plugin = _load_plugin()
+    plain = _event('[{"id":"plain"}]')
+    multiple = _event("two blocks")
+    multiple.raw_message["blocks"] = [
+        {
+            "type": "rich_text",
+            "elements": [
+                {
+                    "type": "rich_text_preformatted",
+                    "elements": [{"type": "text", "text": "[]"}],
+                },
+                {
+                    "type": "rich_text_preformatted",
+                    "elements": [{"type": "text", "text": '[{"id":"two"}]'}],
+                },
+            ],
+        }
+    ]
+
+    assert plugin._valid_broker_json_code_blocks(plain) == []
+    assert len(plugin._valid_broker_json_code_blocks(multiple)) == 2
 
 
 def test_register_exposes_slack_command_and_hook_without_tools():
@@ -141,7 +195,7 @@ def test_register_exposes_slack_command_and_hook_without_tools():
 
     assert ctx.commands[0][0][0] == "hedge-evaluation-deploy"
     assert ctx.commands[0][1]["platforms"] == ("slack",)
-    assert "broker.json" in ctx.commands[0][1]["args_hint"]
+    assert "状态" in ctx.commands[0][1]["args_hint"]
     assert ctx.tools == []
     assert ctx.hooks[0][0][0] == "pre_gateway_dispatch"
 
@@ -224,6 +278,48 @@ async def test_active_thread_is_bound_to_skill_and_requester(tmp_path, monkeypat
     assert followup.auto_skill == "hedge-evaluation-deploy"
     assert "Slack requester: Alice" in followup.channel_prompt
     assert "do not echo raw JSON" in followup.channel_prompt
+    assert "Valid top-level JSON-array code blocks in the current message: 0" in (
+        followup.channel_prompt
+    )
+
+
+@pytest.mark.asyncio
+async def test_active_thread_uses_exact_code_block_instead_of_slack_plain_text(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin()
+    monkeypatch.setattr(plugin, "_state_path", lambda: tmp_path / "state.json")
+    adapter = FakeSlackAdapter()
+    gateway = _gateway(adapter)
+
+    await plugin._handle_evaluation_event(_event("/hedge-evaluation-deploy"), gateway)
+    thread_ts = adapter.client.messages[0]["ts"]
+    exact_code = '[{"trading_fronts":["tcp://front.example:41205"]}]\n'
+    followup = _event(
+        '```\n[{"trading_fronts":["<tcp://front.example:41205>"]}]\n```',
+        thread_id=thread_ts,
+    )
+    followup.raw_message["blocks"] = [
+        {
+            "type": "rich_text",
+            "elements": [
+                {
+                    "type": "rich_text_preformatted",
+                    "elements": [{"type": "text", "text": exact_code}],
+                }
+            ],
+        }
+    ]
+
+    result = plugin._pre_gateway_dispatch(followup, gateway)
+
+    assert result == {"action": "allow"}
+    assert followup.text.endswith(exact_code)
+    assert "<tcp://" not in followup.text
+    assert "Authoritative broker_json extracted verbatim" in followup.text
+    assert "Valid top-level JSON-array code blocks in the current message: 1" in (
+        followup.channel_prompt
+    )
 
 
 def test_pre_gateway_dispatch_does_not_bypass_auth(tmp_path, monkeypatch):

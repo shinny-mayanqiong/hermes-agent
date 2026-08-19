@@ -10,6 +10,7 @@ Uses slack-bolt (Python) with Socket Mode for:
 
 import asyncio
 import contextvars
+import html
 import json
 import logging
 import os
@@ -57,6 +58,10 @@ from gateway.platforms.base import (
 
 logger = logging.getLogger(__name__)
 
+_SLACK_AUTOLINK_RE = re.compile(
+    r"<((?:(?:[A-Za-z][A-Za-z0-9+.-]*):|www\.)[^>|]+)(?:\|[^>]*)?>"
+)
+
 # ContextVar carrying the user_id of the slash-command invoker.
 # Set in _handle_slash_command, read in send() to match the correct
 # stashed response_url when multiple users issue commands on the same
@@ -89,6 +94,14 @@ def _is_human_only_message(text: str) -> bool:
     return lowered == marker or (
         lowered.startswith(marker) and stripped[len(marker)].isspace()
     )
+
+
+def _normalize_slack_autolinks_for_comparison(text: str) -> str:
+    """Remove Slack URL display wrappers for semantic deduplication only."""
+    return _SLACK_AUTOLINK_RE.sub(
+        lambda match: html.unescape(match.group(1)),
+        text or "",
+    ).strip()
 
 
 def check_slack_requirements() -> bool:
@@ -2438,9 +2451,17 @@ class SlackAdapter(BasePlatformAdapter):
             blocks_text = _extract_text_from_slack_blocks(blocks)
             if blocks_text:
                 # Only append if the blocks contain text not already present
-                # in the plain text field (avoids duplication).
+                # in the plain text field (avoids duplication). Slack may
+                # auto-link URLs only in the plain field (``<url>``) while the
+                # rich-text block retains ``url``. Compare those forms
+                # semantically so pasted JSON/code blocks are not appended a
+                # second time merely because they contain a URL.
                 stripped_blocks = blocks_text.strip()
-                if stripped_blocks and stripped_blocks not in text.strip():
+                comparable_blocks = _normalize_slack_autolinks_for_comparison(
+                    stripped_blocks
+                )
+                comparable_text = _normalize_slack_autolinks_for_comparison(text)
+                if comparable_blocks and comparable_blocks not in comparable_text:
                     logger.debug(
                         "Slack: extracted additional text from blocks "
                         "(likely quoted/forwarded content): %s",

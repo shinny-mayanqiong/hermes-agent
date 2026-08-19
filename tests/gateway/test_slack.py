@@ -1653,6 +1653,38 @@ class TestIncomingDocumentHandling:
         assert msg_event.text == "hello world"
 
     @pytest.mark.asyncio
+    async def test_rich_text_json_dedupes_slack_autolink_wrapper(self, adapter):
+        """URL wrappers in plain text must not duplicate a pasted JSON block."""
+        plain_text = (
+            "```\n"
+            '[{"trading_fronts":["<tcp://front.example:41205>"]}]\n'
+            "```"
+        )
+        raw_json = '[{"trading_fronts":["tcp://front.example:41205"]}]'
+        event = self._make_event(
+            text=plain_text,
+            blocks=[
+                {
+                    "type": "rich_text",
+                    "elements": [
+                        {
+                            "type": "rich_text_preformatted",
+                            "elements": [
+                                {"type": "text", "text": raw_json},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        )
+
+        await adapter._handle_slack_message(event)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == plain_text
+        assert msg_event.text.count("trading_fronts") == 1
+
+    @pytest.mark.asyncio
     async def test_rich_text_quotes_and_lists_are_extracted(self, adapter):
         """Nested quote and list content should be surfaced from rich_text blocks."""
         event = self._make_event(
