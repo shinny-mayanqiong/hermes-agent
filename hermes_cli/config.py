@@ -886,10 +886,11 @@ DEFAULT_CONFIG = {
     "fallback_providers": [],
     "credential_pool_strategies": {},
     "plugins": {
-        # This deployment ships the Odoo Hedge Server Slack workflow as a
-        # default-on business plugin. Operators can remove it from
+        # This deployment ships the Odoo Hedge Server and fixed evaluation
+        # environment Slack workflows as default-on business plugins.
+        # Operators can remove either from
         # plugins.enabled or add it to plugins.disabled to opt out.
-        "enabled": ["odoo-hedge-server"],
+        "enabled": ["odoo-hedge-server", "hedge-evaluation-deploy"],
         "disabled": [],
     },
     "mcp_servers": {
@@ -899,6 +900,16 @@ DEFAULT_CONFIG = {
         "odoo-hedge-server": {
             "url": "http://192.168.139.7:18079/mcp",
             "timeout": 1200,
+            "connect_timeout": 60,
+        },
+        # Fixed evaluation-environment deployment is owned by the dedicated
+        # evaluation-control MCP server. Its deploy tool requires explicit
+        # confirmation for the current broker_json submission and returns a
+        # durable operation record for polling instead of blocking until the
+        # remote install/update finishes.
+        "hedge-evaluation-control": {
+            "url": "http://192.168.139.7:28083/mcp",
+            "timeout": 120,
             "connect_timeout": 60,
         },
     },

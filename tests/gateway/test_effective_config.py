@@ -17,6 +17,9 @@ def test_gateway_effective_config_includes_default_mcp_servers(monkeypatch, tmp_
             "odoo-hedge-server": {
                 "url": "http://192.168.139.7:18079/mcp",
             },
+            "hedge-evaluation-control": {
+                "url": "http://192.168.139.7:28083/mcp",
+            },
         },
     }
 
@@ -29,6 +32,7 @@ def test_gateway_effective_config_includes_default_mcp_servers(monkeypatch, tmp_
     toolsets = _get_platform_tools(gateway_run._load_gateway_effective_config(), "slack")
 
     assert "odoo-hedge-server" in toolsets
+    assert "hedge-evaluation-control" in toolsets
 
 
 def test_gateway_effective_config_falls_back_to_raw_for_noncanonical_home(

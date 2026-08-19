@@ -1,0 +1,7 @@
+name: hedge-evaluation-deploy
+version: "0.1.0"
+description: "Start Slack threads for fixed evaluation-environment deployments."
+author: "Hermes Agent"
+kind: standalone
+hooks:
+  - pre_gateway_dispatch

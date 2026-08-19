@@ -1,0 +1,4 @@
+interface:
+  display_name: "测评环境部署"
+  short_description: "通过 Slack 收集 broker.json 并安全部署测评环境"
+  default_prompt: "Use $hedge-evaluation-deploy to collect and validate broker.json, obtain explicit confirmation, and safely deploy the fixed evaluation environment."
