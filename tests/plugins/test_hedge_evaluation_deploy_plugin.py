@@ -101,14 +101,24 @@ def test_skill_defines_sensitive_confirmed_mcp_workflow():
     skill = SKILL_PATH.read_text(encoding="utf-8")
 
     assert "确认部署测评环境" in skill
-    assert "explicit confirmation for the current validated payload" in skill
+    assert "current validated submission" in skill
     assert "ctp_auth_code" in skill
     assert "Never paste it back" in skill
     assert "call a memory tool" in skill
     assert "exactly one Slack code block" in skill
     assert "Authoritative broker_json" in skill
     assert "Preserve it exactly" in skill
-    assert "The control plane accepts an empty array" in skill
+    assert "does not guarantee that the control plane accepts an empty" in skill
+    assert "latest `origin/master`" in skill
+    assert "`commit` alone" in skill
+    assert "both `branch` and `commit`" in skill
+    assert "`tag` alone" in skill
+    assert "`ctp_api_test_mode` must be a JSON boolean" in skill
+    assert "references/retry-after-failed-deploy.md" in skill
+    assert "complete confirmed deployment submission" in (
+        SKILL_PATH.parent.joinpath("references/retry-after-failed-deploy.md")
+        .read_text(encoding="utf-8")
+    )
     for tool_name in (
         "evaluation_healthz",
         "check_evaluation_environment_status",
@@ -216,6 +226,8 @@ async def test_command_without_args_creates_private_workflow_thread(tmp_path, mo
     assert "测评环境部署线程已开启" in root["text"]
     assert reply["thread_ts"] == root["ts"]
     assert "确认部署测评环境" in reply["text"]
+    assert "Hedge V2 版本" in reply["text"]
+    assert "ctp_api_test_mode" in reply["text"]
     assert "私有 Slack 频道" in reply["text"]
     assert not adapter.handled_events
     assert root["ts"] in adapter._bot_message_ts

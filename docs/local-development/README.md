@@ -32,7 +32,7 @@
 | Odoo Hedge workflow orchestration | `odoo-hedge-workflow` | `plugins/odoo-hedge-workflow/` | 已实现 | 动态 DAG / skill-based delivery workflow。`odoo-hedge-dev-assistant` 是项目文档层，这个 plugin 是执行层。 |
 | Odoo Hedge PR review | `pr-review` / `odoo-hedge-pr-review` | `plugins/odoo-hedge-workflow/pr_review.py` | 已实现 | PR review 辅助入口，当前属于 `odoo-hedge-workflow` plugin 的子能力，不建议单独当成一个无关项目维护。 |
 | Odoo Hedge sandbox server | `odoo-hedge-server` | `plugins/odoo-hedge-server/`, `skills/odoo-hedge-server/SKILL.md` | 已实现 | 通过 Slack thread、MCP server 和 skill 操作 Odoo hedge 开发/测试沙箱。 |
-| Hedge evaluation control | `hedge-evaluation-deploy` / `hedge-evaluation-control` | `plugins/hedge-evaluation-deploy/`, `skills/hedge-evaluation-deploy/SKILL.md`, `http://192.168.139.7:28083/mcp` | 服务端已部署，Hermes 与 Slack 默认接入 | `/hedge-evaluation-deploy` 创建专用 Slack thread，要求在单个 Slack 代码块中提交 `broker.json` 原文；校验后脱敏展示并要求发起人明确确认，再通过持久化 operation 部署和验证固定测评环境。 |
+| Hedge evaluation control | `hedge-evaluation-deploy` / `hedge-evaluation-control` | `plugins/hedge-evaluation-deploy/`, `skills/hedge-evaluation-deploy/SKILL.md`, `http://192.168.139.7:28083/mcp` | 服务端已部署，Hermes 与 Slack 默认接入 | `/hedge-evaluation-deploy` 创建专用 Slack thread，要求在单个 Slack 代码块中提交 `broker.json` 原文，并收集 Hedge V2 版本与 `ctp_api_test_mode`；展示完整脱敏摘要并要求发起人明确确认后，再通过持久化 operation 部署和验证固定测评环境。 |
 
 ## 分类判断
 

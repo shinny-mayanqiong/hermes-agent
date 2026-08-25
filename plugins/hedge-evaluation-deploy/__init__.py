@@ -379,6 +379,7 @@ def _format_thread_prompt(record: dict[str, Any]) -> str:
     return "\n".join(
         [
             "请在此 thread 用一个代码块提交完整 broker.json 数组；代码块以外的 JSON 不会用于部署。",
+            "可以在代码块外指定 Hedge V2 版本和 ctp_api_test_mode；系统会在部署前展示最终生效值。",
             f"当前发起人：{requester}",
             "也可以直接询问测评环境状态、验证结果或 operation 状态。",
             "系统会先给出脱敏摘要；只有发起人随后回复 `确认部署测评环境` 才会开始部署。",
@@ -401,7 +402,7 @@ async def _handle_command_start(event: Any, gateway: Any, args: str) -> None:
         [
             "Hedge 测评环境部署线程已开启。",
             f"发起人：{_format_user(record['user_name'], record['user_id'])}",
-            "请在此 thread 内完成 broker.json 收集、脱敏确认、部署和验证。",
+            "请在此 thread 内完成 broker.json、Hedge V2 版本和 ctp_api_test_mode 收集、脱敏确认、部署和验证。",
         ]
     )
     if args.strip():
@@ -495,7 +496,7 @@ def _usage(raw_args: str) -> str:
     del raw_args
     return (
         "Usage: `/hedge-evaluation-deploy [状态 | 验证 | operation ID]`\n"
-        "部署时会创建专用 thread；请在 thread 中用恰好一个代码块提交 broker.json，脱敏展示后等待发起人明确确认，再调用测评环境部署 MCP。"
+        "部署时会创建专用 thread；请用恰好一个代码块提交 broker.json，并在代码块外按需指定 Hedge V2 版本和 ctp_api_test_mode。系统展示完整脱敏摘要并取得明确确认后才会调用部署 MCP。"
     )
 
 
