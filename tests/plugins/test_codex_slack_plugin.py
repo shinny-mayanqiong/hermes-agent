@@ -254,6 +254,24 @@ def test_binding_store_persists_and_enforces_bijection(plugin, tmp_path):
         reopened.create(plugin.Binding("T", "C", "2.0", "U", "codex-1", "/tmp", 2.0, 2.0))
 
 
+def test_shared_daemon_wires_catalog_and_sessions_to_unix_socket(plugin, tmp_path):
+    config = plugin.PluginConfig(
+        default_cwd=str(tmp_path),
+        allowed_roots=(str(tmp_path),),
+        shared_daemon=True,
+        daemon_socket="/tmp/codex-shared.sock",
+    )
+    manager = plugin.CodexSlackManager(
+        config=config,
+        store=plugin.BindingStore(tmp_path / "bindings.sqlite3"),
+    )
+
+    catalog_factory = manager.catalog._client_factory
+    assert catalog_factory.keywords["unix_socket"] == "/tmp/codex-shared.sock"
+    assert manager.session_factory.keywords["client_factory"] is catalog_factory
+    assert manager.session_factory.keywords["allow_active_turn_steer"] is True
+
+
 def test_resolve_cwd_blocks_parent_and_symlink_escape(plugin, tmp_path):
     allowed = tmp_path / "repos"
     allowed.mkdir()

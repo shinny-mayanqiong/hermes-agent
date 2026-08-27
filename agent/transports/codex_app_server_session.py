@@ -131,6 +131,17 @@ def _thread_summary(thread: dict[str, Any]) -> CodexThreadSummary:
     )
 
 
+def _in_progress_turn_id(thread: dict[str, Any]) -> Optional[str]:
+    """Return the newest active turn id from an app-server Thread payload."""
+    turns = thread.get("turns") or []
+    for turn in reversed(turns):
+        if isinstance(turn, dict) and turn.get("status") == "inProgress":
+            turn_id = str(turn.get("id") or "").strip()
+            if turn_id:
+                return turn_id
+    return None
+
+
 class CodexThreadCatalog:
     """Read-only thread/list + thread/read facade over a short-lived client."""
 
@@ -329,6 +340,7 @@ class CodexAppServerSession:
         permission_profile: Optional[str] = None,
         approval_callback: Optional[Callable[..., str]] = None,
         on_event: Optional[Callable[[dict], None]] = None,
+        allow_active_turn_steer: bool = False,
         request_routing: Optional[_ServerRequestRouting] = None,
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
     ) -> None:
@@ -344,11 +356,13 @@ class CodexAppServerSession:
         )
         self._approval_callback = approval_callback
         self._on_event = on_event  # Display hook (kawaii spinner ticks etc.)
+        self._allow_active_turn_steer = bool(allow_active_turn_steer)
         self._routing = request_routing or _ServerRequestRouting()
         self._client_factory = client_factory or CodexAppServerClient
 
         self._client: Optional[CodexAppServerClient] = None
         self._thread_id: Optional[str] = None
+        self._active_turn_id: Optional[str] = None
         self._interrupt_event = threading.Event()
         # Pending file-change items, keyed by item id. Populated on
         # item/started for fileChange items; consumed by the approval
@@ -422,6 +436,8 @@ class CodexAppServerSession:
                 ),
             )
         self._thread_id = thread_id
+        if self._allow_active_turn_steer:
+            self._active_turn_id = _in_progress_turn_id(thread_obj)
         logger.info(
             "codex app-server thread %s: id=%s profile=%s cwd=%s",
             "resumed" if self._resume_thread_id else "started",
@@ -442,6 +458,7 @@ class CodexAppServerSession:
                 pass
             self._client = None
         self._thread_id = None
+        self._active_turn_id = None
 
     def __enter__(self) -> "CodexAppServerSession":
         return self
@@ -497,6 +514,66 @@ class CodexAppServerSession:
 
     # ---------- per-turn ----------
 
+    def _read_active_turn_id(self) -> Optional[str]:
+        """Read daemon-owned runtime state before starting or steering a turn."""
+        assert self._client is not None and self._thread_id is not None
+        response = self._client.request(
+            "thread/read",
+            {"threadId": self._thread_id, "includeTurns": True},
+            timeout=10,
+        )
+        return _in_progress_turn_id(response.get("thread") or {})
+
+    def _submit_turn_input(self, user_input_text: str) -> str:
+        """Start an idle turn or steer the turn already owned by the daemon."""
+        assert self._client is not None and self._thread_id is not None
+        input_items = [{"type": "text", "text": user_input_text}]
+        active_turn_id: Optional[str] = None
+        if self._allow_active_turn_steer:
+            active_turn_id = self._read_active_turn_id()
+        if active_turn_id:
+            response = self._client.request(
+                "turn/steer",
+                {
+                    "threadId": self._thread_id,
+                    "expectedTurnId": active_turn_id,
+                    "input": input_items,
+                },
+                timeout=10,
+            )
+            self._active_turn_id = str(response.get("turnId") or active_turn_id)
+            return self._active_turn_id
+
+        try:
+            response = self._client.request(
+                "turn/start",
+                {"threadId": self._thread_id, "input": input_items},
+                timeout=10,
+            )
+        except CodexAppServerError:
+            # Another daemon client may have started a turn between our state
+            # read and turn/start. Re-read once and steer that turn if present.
+            if not self._allow_active_turn_steer:
+                raise
+            active_turn_id = self._read_active_turn_id()
+            if not active_turn_id:
+                raise
+            response = self._client.request(
+                "turn/steer",
+                {
+                    "threadId": self._thread_id,
+                    "expectedTurnId": active_turn_id,
+                    "input": input_items,
+                },
+                timeout=10,
+            )
+            self._active_turn_id = str(response.get("turnId") or active_turn_id)
+            return self._active_turn_id
+
+        turn_id = str((response.get("turn") or {}).get("id") or "")
+        self._active_turn_id = turn_id or None
+        return turn_id
+
     def run_turn(
         self,
         user_input: Any,
@@ -539,17 +616,11 @@ class CodexAppServerSession:
 
         user_input_text = _coerce_turn_input_text(user_input)
 
-        # Send turn/start with the user input. Text-only for now (codex
-        # supports rich content but Hermes' text path is the common case).
+        # Start an idle turn, or steer a daemon-owned active turn. Text-only
+        # for now (codex supports rich content but Hermes' text path is the
+        # common case).
         try:
-            ts = self._client.request(
-                "turn/start",
-                {
-                    "threadId": self._thread_id,
-                    "input": [{"type": "text", "text": user_input_text}],
-                },
-                timeout=10,
-            )
+            submitted_turn_id = self._submit_turn_input(user_input_text)
         except CodexAppServerError as exc:
             # Classify auth/refresh failures so the user gets a clear
             # `codex login` pointer instead of a raw RPC error string.
@@ -577,7 +648,7 @@ class CodexAppServerSession:
             result.should_retire = True
             return result
 
-        result.turn_id = (ts.get("turn") or {}).get("id")
+        result.turn_id = submitted_turn_id or None
         deadline = time.monotonic() + turn_timeout
         turn_complete = False
         # Post-tool watchdog state. last_tool_completion_at is set whenever
@@ -715,6 +786,7 @@ class CodexAppServerSession:
 
             if method == "turn/completed":
                 turn_complete = True
+                self._active_turn_id = None
                 turn_status = (
                     (note.get("params") or {}).get("turn") or {}
                 ).get("status")

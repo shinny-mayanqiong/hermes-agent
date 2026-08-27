@@ -183,6 +183,52 @@ class TestLifecycle:
         assert params == {"threadId": "thread-existing-123", "cwd": "/tmp"}
         assert not any(method == "thread/start" for method, _ in client.requests)
 
+    def test_shared_daemon_steers_the_active_cli_turn(self):
+        client = FakeClient()
+
+        def handler(method, params):
+            if method == "thread/resume":
+                return {
+                    "thread": {
+                        "id": params["threadId"],
+                        "turns": [{"id": "turn-cli-active", "status": "inProgress"}],
+                    }
+                }
+            if method == "thread/read":
+                return {
+                    "thread": {
+                        "id": params["threadId"],
+                        "turns": [{"id": "turn-cli-active", "status": "inProgress"}],
+                    }
+                }
+            if method == "turn/steer":
+                return {"turnId": params["expectedTurnId"]}
+            return {}
+
+        client._request_handler = handler
+        client.queue_notification(
+            "turn/completed",
+            turn={"id": "turn-cli-active", "status": "completed"},
+        )
+        s = make_session(
+            client,
+            resume_thread_id="thread-existing-123",
+            allow_active_turn_steer=True,
+        )
+
+        result = s.run_turn("message from Slack", turn_timeout=1)
+
+        assert result.turn_id == "turn-cli-active"
+        assert result.error is None
+        method, params = next(r for r in client.requests if r[0] == "turn/steer")
+        assert method == "turn/steer"
+        assert params == {
+            "threadId": "thread-existing-123",
+            "expectedTurnId": "turn-cli-active",
+            "input": [{"type": "text", "text": "message from Slack"}],
+        }
+        assert not any(method == "turn/start" for method, _ in client.requests)
+
 
 class TestThreadCatalog:
     def test_list_threads_uses_recency_pagination_and_interactive_sources(self):

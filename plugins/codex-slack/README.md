@@ -19,6 +19,8 @@ plugins:
     queue_limit: 5
     max_live_sessions: 5
     idle_timeout_seconds: 1800
+    shared_daemon: true
+    daemon_socket: /home/user/.codex/app-server-control/app-server-control.sock
 
 slack:
   free_response_channels:
@@ -35,6 +37,13 @@ non-empty, it must include the home channel too.
 Access is channel-scoped, not user-scoped: every member who can use the home
 channel can list, create, resume, continue, stop, and approve its Codex
 sessions. The stored Slack user ID is audit metadata only.
+
+With `shared_daemon: true`, Hermes connects directly to the managed app-server's
+Unix-socket WebSocket transport instead of spawning a separate app-server
+writer. Start the managed daemon with
+`codex app-server daemon bootstrap --remote-control`, then use `codex agents`
+for the terminal UI. A plain `codex` process remains standalone and cannot
+share a live session with Slack.
 
 Regenerate and apply the Slack app manifest after enabling the plugin so Slack
 knows about the native `/codex` command. Until then, every command below also

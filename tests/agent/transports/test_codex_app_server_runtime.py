@@ -142,6 +142,87 @@ class TestCodexAppServerModule:
         assert "boom" in str(err)
         assert "-32600" in str(err)
 
+    def test_unix_socket_uses_websocket_without_spawning(self, monkeypatch) -> None:
+        import json
+        import queue
+        import subprocess
+
+        from agent.transports import codex_app_server as cas
+
+        captured: dict[str, str] = {}
+
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self.incoming: queue.Queue[str | None] = queue.Queue()
+                self.sent: list[dict] = []
+                self.closed = False
+
+            def __iter__(self):
+                while True:
+                    message = self.incoming.get()
+                    if message is None:
+                        return
+                    yield message
+
+            def send(self, payload: str) -> None:
+                request = json.loads(payload)
+                self.sent.append(request)
+                if "id" not in request:
+                    return
+                if request["method"] == "initialize":
+                    result = {"userAgent": "fake-shared-daemon"}
+                else:
+                    result = {"data": []}
+                self.incoming.put(
+                    json.dumps({"id": request["id"], "result": result})
+                )
+
+            def close(self) -> None:
+                self.closed = True
+                self.incoming.put(None)
+
+        websocket = FakeWebSocket()
+
+        def fake_unix_connect(
+            *, path: str, uri: str, compression: None, open_timeout: int
+        ):
+            captured.update(
+                path=path,
+                uri=uri,
+                compression=str(compression),
+                open_timeout=str(open_timeout),
+            )
+            return websocket
+
+        monkeypatch.setattr(
+            "websockets.sync.client.unix_connect", fake_unix_connect
+        )
+        monkeypatch.setattr(
+            subprocess,
+            "Popen",
+            lambda *args, **kwargs: pytest.fail("unix socket must not spawn codex"),
+        )
+
+        client = cas.CodexAppServerClient(unix_socket="/tmp/codex-shared.sock")
+        try:
+            assert client.initialize()["userAgent"] == "fake-shared-daemon"
+            assert client.request("thread/list", {}) == {"data": []}
+            assert captured == {
+                "path": "/tmp/codex-shared.sock",
+                "uri": "ws://localhost/rpc",
+                "compression": "None",
+                "open_timeout": "10",
+            }
+            assert [request["method"] for request in websocket.sent] == [
+                "initialize",
+                "initialized",
+                "thread/list",
+            ]
+        finally:
+            client.close()
+
+        assert websocket.closed is True
+
 
 class TestSpawnEnvIsolation:
     """The codex spawn must NOT rewrite HOME — codex's shell tool spawns

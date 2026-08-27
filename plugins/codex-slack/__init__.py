@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ from agent.transports.codex_app_server_session import (
     CodexThreadPage,
     CodexThreadSummary,
 )
+from agent.transports.codex_app_server import CodexAppServerClient
 from gateway.config import Platform
 from hermes_constants import get_hermes_home
 from hermes_cli.config import load_config
@@ -50,6 +52,8 @@ class PluginConfig:
     max_live_sessions: int = 5
     idle_timeout_seconds: int = 1800
     approval_timeout_seconds: int = 600
+    shared_daemon: bool = False
+    daemon_socket: str = ""
 
 
 @dataclass
@@ -113,6 +117,16 @@ def _load_plugin_config() -> PluginConfig:
             value = default
         return min(value, maximum) if maximum is not None else value
 
+    def boolean(name: str, default: bool) -> bool:
+        value = raw.get(name, default)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    daemon_socket = str(raw.get("daemon_socket") or "").strip()
+    if daemon_socket:
+        daemon_socket = str(Path(os.path.expanduser(daemon_socket)).absolute())
+
     return PluginConfig(
         default_cwd=str(Path(os.path.expanduser(default_cwd)).resolve()),
         allowed_roots=normalized_roots,
@@ -121,7 +135,18 @@ def _load_plugin_config() -> PluginConfig:
         max_live_sessions=positive_int("max_live_sessions", 5),
         idle_timeout_seconds=positive_int("idle_timeout_seconds", 1800),
         approval_timeout_seconds=positive_int("approval_timeout_seconds", 600),
+        shared_daemon=boolean("shared_daemon", False),
+        daemon_socket=daemon_socket,
     )
+
+
+def _daemon_client_factory(socket_path: str = "") -> Callable[..., CodexAppServerClient]:
+    socket_path = socket_path or str(
+        Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser()
+        / "app-server-control"
+        / "app-server-control.sock"
+    )
+    return partial(CodexAppServerClient, unix_socket=socket_path)
 
 
 def _platform_value(source: Any) -> str:
@@ -198,14 +223,23 @@ class CodexSlackManager:
         config: Optional[PluginConfig] = None,
         store: Optional[BindingStore] = None,
         catalog: Optional[CodexThreadCatalog] = None,
-        session_factory: Callable[..., CodexAppServerSession] = CodexAppServerSession,
+        session_factory: Optional[Callable[..., CodexAppServerSession]] = None,
     ) -> None:
         self.config = config or _load_plugin_config()
         self.store = store or BindingStore(
             get_hermes_home() / "state" / "codex-slack.sqlite3"
         )
-        self.catalog = catalog or CodexThreadCatalog()
-        self.session_factory = session_factory
+        if self.config.shared_daemon:
+            client_factory = _daemon_client_factory(self.config.daemon_socket)
+            self.catalog = catalog or CodexThreadCatalog(client_factory=client_factory)
+            self.session_factory = session_factory or partial(
+                CodexAppServerSession,
+                client_factory=client_factory,
+                allow_active_turn_steer=True,
+            )
+        else:
+            self.catalog = catalog or CodexThreadCatalog()
+            self.session_factory = session_factory or CodexAppServerSession
         self.gateway: Any = None
         self._runtimes: OrderedDict[str, _Runtime] = OrderedDict()
         self._actions: dict[str, _ActionState] = {}

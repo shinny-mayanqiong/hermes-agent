@@ -1,9 +1,11 @@
 """Codex app-server JSON-RPC client.
 
 Speaks the protocol documented in codex-rs/app-server/README.md (codex 0.125+).
-Transport is newline-delimited JSON-RPC 2.0 over stdio: spawn `codex app-server`,
-do an `initialize` handshake, then drive `thread/start` + `turn/start` and
-consume streaming `item/*` notifications until `turn/completed`.
+Transport is either newline-delimited JSON-RPC 2.0 over a spawned
+`codex app-server`, or JSON-RPC messages over WebSocket on a shared Unix
+socket. Both paths do an `initialize` handshake, then drive `thread/start` +
+`turn/start` and consume streaming `item/*` notifications until
+`turn/completed`.
 
 This module is the wire-level speaker only. Higher-level concerns (event
 projection into Hermes' display, approval bridging, transcript projection into
@@ -72,6 +74,7 @@ class CodexAppServerClient:
         codex_home: Optional[str] = None,
         extra_args: Optional[list[str]] = None,
         env: Optional[dict[str, str]] = None,
+        unix_socket: Optional[str] = None,
     ) -> None:
         self._codex_bin = codex_bin
         spawn_env = os.environ.copy()
@@ -114,14 +117,6 @@ class CodexAppServerClient:
         # Codex emits tracing to stderr; default WARN keeps it quiet for users.
         spawn_env.setdefault("RUST_LOG", "warn")
 
-        self._proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=0,
-            env=spawn_env,
-        )
         self._next_id = 1
         self._pending: dict[int, _Pending] = {}
         self._pending_lock = threading.Lock()
@@ -131,11 +126,38 @@ class CodexAppServerClient:
         self._stderr_lock = threading.Lock()
         self._closed = False
         self._initialized = False
+        self._transport_dead = False
+        self._ws: Any = None
+        self._proc: Any = None
 
-        self._reader = threading.Thread(target=self._read_stdout, daemon=True)
+        if unix_socket:
+            from websockets.sync.client import unix_connect
+
+            self._ws = unix_connect(
+                path=str(unix_socket),
+                uri="ws://localhost/rpc",
+                compression=None,
+                open_timeout=10,
+            )
+        else:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+                env=spawn_env,
+            )
+
+        reader_target = self._read_websocket if self._ws is not None else self._read_stdout
+        self._reader = threading.Thread(target=reader_target, daemon=True)
         self._reader.start()
-        self._stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
-        self._stderr_reader.start()
+        self._stderr_reader: Optional[threading.Thread] = None
+        if self._proc is not None:
+            self._stderr_reader = threading.Thread(
+                target=self._read_stderr, daemon=True
+            )
+            self._stderr_reader.start()
 
     # ---------- lifecycle ----------
 
@@ -169,6 +191,14 @@ class CodexAppServerClient:
         if self._closed:
             return
         self._closed = True
+        if self._ws is not None:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+            return
+        if self._proc is None:
+            return
         try:
             if self._proc.stdin and not self._proc.stdin.closed:
                 self._proc.stdin.close()
@@ -268,7 +298,9 @@ class CodexAppServerClient:
             return list(self._stderr_lines[-n:])
 
     def is_alive(self) -> bool:
-        return self._proc.poll() is None
+        if self._ws is not None:
+            return not self._closed and not self._transport_dead
+        return self._proc is not None and self._proc.poll() is None
 
     # ---------- internals ----------
 
@@ -283,6 +315,15 @@ class CodexAppServerClient:
     def _send(self, obj: dict) -> None:
         if self._closed:
             raise RuntimeError("codex app-server client is closed")
+        if self._ws is not None:
+            try:
+                self._ws.send(json.dumps(obj))
+                return
+            except Exception as exc:
+                self._transport_dead = True
+                raise RuntimeError(
+                    f"codex app-server websocket closed unexpectedly: {exc}"
+                ) from exc
         if self._proc.stdin is None:
             raise RuntimeError("codex app-server stdin not available")
         try:
@@ -294,7 +335,7 @@ class CodexAppServerClient:
             ) from exc
 
     def _read_stdout(self) -> None:
-        if self._proc.stdout is None:
+        if self._proc is None or self._proc.stdout is None:
             return
         try:
             for line in iter(self._proc.stdout.readline, b""):
@@ -317,6 +358,31 @@ class CodexAppServerClient:
         except Exception as exc:
             with self._stderr_lock:
                 self._stderr_lines.append(f"<stdout reader error> {exc}")
+        finally:
+            self._transport_dead = True
+
+    def _read_websocket(self) -> None:
+        if self._ws is None:
+            return
+        try:
+            for message in self._ws:
+                if isinstance(message, bytes):
+                    message = message.decode("utf-8", "replace")
+                try:
+                    parsed = json.loads(message)
+                except (TypeError, json.JSONDecodeError):
+                    with self._stderr_lock:
+                        self._stderr_lines.append(
+                            f"<non-json websocket message> {str(message)[:200]!r}"
+                        )
+                    continue
+                self._dispatch(parsed)
+        except Exception as exc:
+            if not self._closed:
+                with self._stderr_lock:
+                    self._stderr_lines.append(f"<websocket reader error> {exc}")
+        finally:
+            self._transport_dead = True
 
     def _dispatch(self, msg: dict) -> None:
         # Reply (has id + result/error, no method)
@@ -338,7 +404,7 @@ class CodexAppServerClient:
             self._notifications.put(msg)
 
     def _read_stderr(self) -> None:
-        if self._proc.stderr is None:
+        if self._proc is None or self._proc.stderr is None:
             return
         try:
             for line in iter(self._proc.stderr.readline, b""):
