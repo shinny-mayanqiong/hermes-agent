@@ -1,0 +1,530 @@
+"""Behavior tests for the Slack ↔ local Codex session plugin."""
+
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from agent.transports.codex_app_server_session import (
+    CodexThreadPage,
+    CodexThreadSummary,
+    TurnResult,
+)
+from gateway.config import Platform
+
+
+PLUGIN_DIR = Path(__file__).resolve().parents[2] / "plugins" / "codex-slack"
+
+
+def _load_plugin():
+    module_name = "test_codex_slack_plugin_package"
+    for name in [key for key in sys.modules if key == module_name or key.startswith(module_name + ".")]:
+        sys.modules.pop(name, None)
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        PLUGIN_DIR / "__init__.py",
+        submodule_search_locations=[str(PLUGIN_DIR)],
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def plugin():
+    return _load_plugin()
+
+
+class FakeSlackClient:
+    def __init__(self):
+        self.messages: list[dict] = []
+        self.ephemeral: list[dict] = []
+        self.updates: list[dict] = []
+        self._counter = 100
+        self.missing: set[str] = set()
+
+    async def chat_postMessage(self, **kwargs):
+        self._counter += 1
+        message = {**kwargs, "ts": f"{self._counter}.000"}
+        self.messages.append(message)
+        return message
+
+    async def chat_postEphemeral(self, **kwargs):
+        self._counter += 1
+        message = {**kwargs, "message_ts": f"{self._counter}.000"}
+        self.ephemeral.append(message)
+        return message
+
+    async def chat_update(self, **kwargs):
+        self.updates.append(kwargs)
+        return {"ok": True}
+
+    async def chat_getPermalink(self, *, channel, message_ts):
+        del channel
+        if message_ts in self.missing:
+            raise RuntimeError("message_not_found")
+        return {"ok": True, "permalink": f"https://slack.test/thread/{message_ts}"}
+
+
+class FakeSlackAdapter:
+    def __init__(self, *, authorized=True):
+        self.client = FakeSlackClient()
+        self.authorized = authorized
+        self._bot_message_ts = set()
+        self.sent: list[dict] = []
+        self.pop_count = 0
+
+    def _get_client(self, channel_id):
+        del channel_id
+        return self.client
+
+    def _is_interactive_user_authorized(self, user_id, **kwargs):
+        del user_id, kwargs
+        return self.authorized
+
+    def _pop_slash_context(self, channel_id):
+        del channel_id
+        self.pop_count += 1
+        return None
+
+    def format_message(self, text):
+        return text
+
+    async def send(self, channel_id, text, metadata=None):
+        self.sent.append({"channel": channel_id, "text": text, "metadata": metadata})
+        return SimpleNamespace(success=True)
+
+
+class FakeGatewayConfig:
+    def __init__(self, home="C_HOME"):
+        self.home = home
+
+    def get_home_channel(self, platform):
+        assert platform == Platform.SLACK
+        return SimpleNamespace(chat_id=self.home) if self.home else None
+
+
+class FakeGateway:
+    def __init__(self, adapter=None, *, home="C_HOME", authorized=True):
+        self.adapter = adapter or FakeSlackAdapter(authorized=authorized)
+        self.adapters = {Platform.SLACK: self.adapter}
+        self.config = FakeGatewayConfig(home)
+        self.authorized = authorized
+
+    def _is_user_authorized(self, source):
+        del source
+        return self.authorized
+
+
+class FakeCatalog:
+    def __init__(self, threads=None):
+        self.threads = list(threads or [])
+        self.list_calls = []
+
+    def list_threads(self, **kwargs):
+        self.list_calls.append(kwargs)
+        return CodexThreadPage(self.threads, next_cursor="next-page")
+
+    def read_thread(self, thread_id):
+        for thread in self.threads:
+            if thread.thread_id == thread_id:
+                return thread
+        raise RuntimeError("not found")
+
+
+class FakeSession:
+    instances = []
+    next_thread_id = "codex-new-1"
+
+    def __init__(self, *, cwd, resume_thread_id=None, approval_callback=None, on_event=None, **kwargs):
+        del kwargs
+        self.cwd = cwd
+        self.resume_thread_id = resume_thread_id
+        self.approval_callback = approval_callback
+        self.on_event = on_event
+        self.closed = False
+        self.interrupted = False
+        FakeSession.instances.append(self)
+
+    def ensure_started(self):
+        return self.resume_thread_id or self.next_thread_id
+
+    def run_turn(self, text):
+        if self.on_event:
+            self.on_event({"method": "item/started", "params": {"item": {"type": "commandExecution"}}})
+        return TurnResult(final_text=f"answer: {text}", thread_id=self.ensure_started())
+
+    def request_interrupt(self):
+        self.interrupted = True
+
+    def close(self):
+        self.closed = True
+
+
+def _summary(thread_id="codex-1", cwd="/tmp/project", title="Session"):
+    return CodexThreadSummary(
+        thread_id=thread_id,
+        title=title,
+        cwd=str(cwd),
+        source_kind="cli",
+        created_at=10,
+        updated_at=20,
+        recency_at=30,
+    )
+
+
+def _event(text, *, channel="C_HOME", thread_id="", user_id="U_ME", team="T1"):
+    return SimpleNamespace(
+        text=text,
+        source=SimpleNamespace(
+            platform=Platform.SLACK,
+            chat_id=channel,
+            thread_id=thread_id or None,
+            user_id=user_id,
+            user_name="Me",
+            guild_id=None,
+        ),
+        raw_message={"team_id": team, "text": text},
+    )
+
+
+def _hermes_codex_event(args, **kwargs):
+    event = _event(f"codex {args}".strip(), **kwargs)
+    event.raw_message["command"] = "/hermes"
+    return event
+
+
+def _manager(plugin, tmp_path, *, threads=None, allowed_root=None):
+    root = Path(allowed_root or tmp_path)
+    root.mkdir(parents=True, exist_ok=True)
+    default = root / "project"
+    default.mkdir(exist_ok=True)
+    config = plugin.PluginConfig(
+        default_cwd=str(default),
+        allowed_roots=(str(root),),
+        page_size=20,
+        queue_limit=5,
+        max_live_sessions=5,
+        idle_timeout_seconds=1800,
+        approval_timeout_seconds=2,
+    )
+    store = plugin.BindingStore(tmp_path / "codex-slack.sqlite3")
+    manager = plugin.CodexSlackManager(
+        config=config,
+        store=store,
+        catalog=FakeCatalog(threads),
+        session_factory=FakeSession,
+    )
+    manager.gateway = FakeGateway()
+    return manager
+
+
+def _binding(plugin, manager, *, thread_ts="101.000", codex_id="codex-1"):
+    binding = plugin.Binding(
+        team_id="T1",
+        channel_id="C_HOME",
+        thread_ts=thread_ts,
+        user_id="U_ME",
+        codex_thread_id=codex_id,
+        cwd=manager.config.default_cwd,
+        created_at=time.time(),
+        last_used_at=time.time(),
+    )
+    manager.store.create(binding)
+    return binding
+
+
+def test_binding_store_persists_and_enforces_bijection(plugin, tmp_path):
+    store = plugin.BindingStore(tmp_path / "state" / "codex-slack.sqlite3")
+    binding = plugin.Binding("T", "C", "1.0", "U", "codex-1", "/tmp", 1.0, 1.0)
+    store.create(binding)
+
+    reopened = plugin.BindingStore(store.path)
+    assert reopened.by_slack("T", "C", "1.0") == binding
+    assert reopened.by_codex("codex-1") == binding
+    with pytest.raises(plugin.BindingConflict):
+        reopened.create(plugin.Binding("T", "C", "2.0", "U", "codex-1", "/tmp", 2.0, 2.0))
+
+
+def test_resolve_cwd_blocks_parent_and_symlink_escape(plugin, tmp_path):
+    allowed = tmp_path / "repos"
+    allowed.mkdir()
+    nested = allowed / "team" / "project" / "worktree"
+    nested.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (allowed / "link").symlink_to(outside, target_is_directory=True)
+    manager = _manager(plugin, tmp_path / "state", allowed_root=allowed)
+
+    assert manager.resolve_cwd("") == str((allowed / "project").resolve())
+    assert manager.resolve_cwd("team/project/worktree") == str(nested.resolve())
+    assert manager.resolve_cwd(str(nested)) == str(nested.resolve())
+    with pytest.raises(ValueError, match="允许范围"):
+        manager.resolve_cwd(str(outside))
+    with pytest.raises(ValueError, match="允许范围"):
+        manager.resolve_cwd(str(allowed / "link"))
+
+
+def test_pre_dispatch_is_home_channel_scoped_without_user_filter(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    gateway = manager.gateway
+
+    assert manager.pre_dispatch(_event("hello"), gateway)["action"] == "skip"
+    assert manager.pre_dispatch(_event("hello", channel="C_OTHER"), gateway) is None
+    assert manager.pre_dispatch(_event("/help"), gateway) is None
+
+    unauthorized = FakeGateway(authorized=False)
+    assert manager.pre_dispatch(_event("/codex sessions"), unauthorized)["action"] == "skip"
+
+
+@pytest.mark.asyncio
+async def test_existing_hermes_slash_routes_to_codex_without_native_manifest(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path, threads=[_summary(cwd=tmp_path / "project")])
+    event = _hermes_codex_event("sessions")
+
+    assert manager.pre_dispatch(event, manager.gateway)["action"] == "skip"
+    await manager.handle_event(event)
+
+    assert "最近的 Codex sessions" in manager.gateway.adapter.client.ephemeral[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_new_creates_codex_then_root_and_persists_binding(plugin, tmp_path):
+    FakeSession.instances.clear()
+    manager = _manager(plugin, tmp_path)
+
+    await manager.handle_command(_event("/codex new"))
+
+    binding = manager.store.by_codex("codex-new-1")
+    assert binding is not None
+    assert binding.cwd == manager.config.default_cwd
+    assert manager.gateway.adapter.client.messages[0]["channel"] == "C_HOME"
+    assert "Codex session 已创建" in manager.gateway.adapter.client.messages[0]["text"]
+    assert FakeSession.instances[0].closed is True
+    assert manager.gateway.adapter.pop_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_resume_reuses_existing_binding_instead_of_duplicating(plugin, tmp_path):
+    thread = _summary(cwd=tmp_path / "project")
+    manager = _manager(plugin, tmp_path, threads=[thread])
+    binding = _binding(plugin, manager)
+
+    await manager.resume_by_id("codex-1", team_id="T1", channel_id="C_HOME", user_id="U_ME")
+
+    persisted = manager.store.by_codex("codex-1")
+    assert persisted is not None
+    assert persisted.codex_thread_id == binding.codex_thread_id
+    assert persisted.thread_ts == binding.thread_ts
+    assert not manager.gateway.adapter.client.messages
+    assert "打开原 thread" in manager.gateway.adapter.client.ephemeral[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_resume_can_replace_a_missing_original_cwd(plugin, tmp_path):
+    missing = tmp_path / "deleted-worktree"
+    replacement = tmp_path / "team" / "replacement"
+    replacement.mkdir(parents=True)
+    manager = _manager(plugin, tmp_path, threads=[_summary(cwd=missing)])
+
+    await manager.handle_command(
+        _event("/codex resume codex-1 team/replacement")
+    )
+
+    binding = manager.store.by_codex("codex-1")
+    assert binding is not None
+    assert binding.cwd == str(replacement.resolve())
+    assert FakeSession.instances[-1].cwd == str(replacement.resolve())
+
+
+@pytest.mark.asyncio
+async def test_sessions_page_is_ephemeral_has_twenty_limit_and_buttons(plugin, tmp_path):
+    threads = [_summary(f"codex-{idx}", tmp_path / "project", f"Session {idx}") for idx in range(20)]
+    manager = _manager(plugin, tmp_path, threads=threads)
+    _binding(plugin, manager, codex_id="codex-0")
+
+    await manager.show_sessions("C_HOME", "U_ME")
+
+    assert manager.catalog.list_calls == [{"cursor": None, "limit": 20}]
+    blocks = manager.gateway.adapter.client.ephemeral[-1]["blocks"]
+    assert len([block for block in blocks if block["type"] == "section"]) == 21
+    action_ids = {block.get("accessory", {}).get("action_id") for block in blocks}
+    assert plugin.ACTION_OPEN in action_ids
+    assert plugin.ACTION_RESUME in action_ids
+    assert blocks[-1]["elements"][-1]["text"]["text"] == "Next"
+
+
+@pytest.mark.asyncio
+async def test_sessions_page_distinguishes_a_deleted_cwd_from_disallowed(plugin, tmp_path):
+    missing = tmp_path / "deleted-worktree"
+    manager = _manager(plugin, tmp_path, threads=[_summary(cwd=missing)])
+
+    await manager.show_sessions("C_HOME", "U_ME")
+
+    blocks = manager.gateway.adapter.client.ephemeral[-1]["blocks"]
+    session_text = blocks[1]["text"]["text"]
+    assert "目录不存在" in session_text
+    assert "/codex resume codex-1 <新目录>" in session_text
+    assert "accessory" not in blocks[1]
+
+
+@pytest.mark.asyncio
+async def test_bound_thread_turn_then_stop_releases_process_and_preserves_binding(plugin, tmp_path):
+    FakeSession.instances.clear()
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+
+    await manager.enqueue_turn(binding, "continue", "U_ME")
+    runtime = manager._runtimes[binding.codex_thread_id]
+    await runtime.worker
+
+    assert manager.gateway.adapter.sent[-1]["text"] == "answer: continue"
+    assert FakeSession.instances[-1].resume_thread_id == "codex-1"
+    assert FakeSession.instances[-1].closed is False
+
+    await manager.stop(binding)
+
+    assert FakeSession.instances[-1].closed is True
+    persisted = manager.store.by_codex("codex-1")
+    assert persisted is not None
+    assert persisted.codex_thread_id == binding.codex_thread_id
+    assert persisted.thread_ts == binding.thread_ts
+    assert binding.codex_thread_id not in manager._runtimes
+    assert "已停止并释放资源" in manager.gateway.adapter.client.messages[-1]["text"]
+    if manager._reaper:
+        manager._reaper.cancel()
+
+
+@pytest.mark.asyncio
+async def test_bound_thread_accepts_messages_from_any_user_in_home_channel(plugin, tmp_path):
+    FakeSession.instances.clear()
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+
+    await manager.handle_event(
+        _event("continue", thread_id=binding.thread_ts, user_id="U_OTHER")
+    )
+    runtime = manager._runtimes[binding.codex_thread_id]
+    await runtime.worker
+
+    assert manager.gateway.adapter.sent[-1]["text"] == "answer: continue"
+    assert not manager.gateway.adapter.client.ephemeral
+    if manager._reaper:
+        manager._reaper.cancel()
+
+
+@pytest.mark.asyncio
+async def test_same_session_queue_rejects_sixth_waiting_message(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+    runtime = manager._runtime(binding)
+    runtime.active = True
+    for idx in range(5):
+        await manager.enqueue_turn(binding, f"queued-{idx}", "U_ME")
+
+    await manager.enqueue_turn(binding, "overflow", "U_ME")
+
+    assert len(runtime.queue) == 5
+    assert "队列已满" in manager.gateway.adapter.client.messages[-1]["text"]
+    if manager._reaper:
+        manager._reaper.cancel()
+
+
+@pytest.mark.asyncio
+async def test_lru_keeps_capacity_but_evicts_to_reserve_new_slot(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    manager.config = plugin.PluginConfig(
+        default_cwd=manager.config.default_cwd,
+        allowed_roots=manager.config.allowed_roots,
+        max_live_sessions=1,
+    )
+    binding = _binding(plugin, manager)
+    runtime = manager._runtime(binding)
+    runtime.session = FakeSession(cwd=binding.cwd, resume_thread_id=binding.codex_thread_id)
+
+    await manager._prune_runtimes()
+    assert binding.codex_thread_id in manager._runtimes
+    assert runtime.session is not None
+
+    session = runtime.session
+    await manager._prune_runtimes(reserve_slot=True)
+    assert binding.codex_thread_id not in manager._runtimes
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_stop_denies_pending_approval_before_closing(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+    runtime = manager._runtime(binding)
+    runtime.session = FakeSession(cwd=binding.cwd, resume_thread_id=binding.codex_thread_id)
+    pending = plugin._PendingApproval(binding, "command", "description")
+    manager._approvals["approval-token"] = pending
+
+    await manager.stop(binding)
+
+    assert pending.event.is_set()
+    assert pending.decision == "deny"
+    assert runtime.session is None
+
+
+@pytest.mark.asyncio
+async def test_slack_approval_button_unblocks_worker_callback(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+    callback = manager._approval_callback(binding, asyncio.get_running_loop())
+
+    task = asyncio.create_task(asyncio.to_thread(callback, "git status", "run command"))
+    for _ in range(100):
+        if manager._approvals:
+            break
+        await asyncio.sleep(0.01)
+    token = next(iter(manager._approvals))
+    await manager.handle_approval_action(
+        plugin.ACTION_APPROVE_ONCE,
+        {"channel": {"id": "C_HOME"}, "user": {"id": "U_OTHER"}, "team": {"id": "T1"}},
+        {"value": token},
+    )
+
+    assert await task == "once"
+
+
+def test_register_exposes_command_hook_and_namespaced_actions(plugin):
+    ctx = SimpleNamespace(
+        commands=[],
+        hooks=[],
+        actions=[],
+        register_command=lambda *args, **kwargs: ctx.commands.append((args, kwargs)),
+        register_hook=lambda *args: ctx.hooks.append(args),
+        register_slack_action_handler=lambda *args: ctx.actions.append(args),
+    )
+
+    plugin.register(ctx)
+
+    assert ctx.commands[0][0][0] == "codex"
+    assert ctx.hooks == [("pre_gateway_dispatch", plugin._pre_gateway_dispatch)]
+    assert {item[0] for item in ctx.actions} == {
+        plugin.ACTION_PAGE,
+        plugin.ACTION_RESUME,
+        plugin.ACTION_OPEN,
+        plugin.ACTION_APPROVE_ONCE,
+        plugin.ACTION_APPROVE_SESSION,
+        plugin.ACTION_DENY,
+    }
+
+
+def test_active_writer_error_is_user_friendly(plugin):
+    message = plugin._friendly_codex_error(
+        RuntimeError("thread abc already has an active writer")
+    )
+
+    assert "另一个本机 Codex 客户端" in message
+    assert "active writer" not in message

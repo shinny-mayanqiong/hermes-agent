@@ -84,6 +84,128 @@ class TurnResult:
     should_retire: bool = False
 
 
+@dataclass(frozen=True)
+class CodexThreadSummary:
+    """Small, stable view of a Codex thread for session pickers."""
+
+    thread_id: str
+    title: str
+    cwd: str
+    source_kind: str
+    created_at: int
+    updated_at: int
+    recency_at: int
+
+
+@dataclass(frozen=True)
+class CodexThreadPage:
+    """One cursor-based page returned by ``thread/list``."""
+
+    threads: list[CodexThreadSummary]
+    next_cursor: Optional[str] = None
+    backwards_cursor: Optional[str] = None
+
+
+def _thread_summary(thread: dict[str, Any]) -> CodexThreadSummary:
+    """Normalize the v2 app-server Thread shape for non-Codex callers."""
+    source = thread.get("source")
+    if isinstance(source, dict):
+        source_kind = next(iter(source), "unknown")
+    else:
+        source_kind = str(source or "unknown")
+    preview = str(thread.get("preview") or "").strip()
+    title = str(thread.get("name") or "").strip()
+    if not title:
+        title = preview.splitlines()[0] if preview else "Untitled session"
+    created_at = int(thread.get("createdAt") or 0)
+    updated_at = int(thread.get("updatedAt") or created_at)
+    recency_at = int(thread.get("recencyAt") or updated_at)
+    return CodexThreadSummary(
+        thread_id=str(thread.get("id") or thread.get("sessionId") or ""),
+        title=title,
+        cwd=str(thread.get("cwd") or ""),
+        source_kind=source_kind,
+        created_at=created_at,
+        updated_at=updated_at,
+        recency_at=recency_at,
+    )
+
+
+class CodexThreadCatalog:
+    """Read-only thread/list + thread/read facade over a short-lived client."""
+
+    SOURCE_KINDS = ("cli", "vscode", "appServer")
+
+    def __init__(
+        self,
+        *,
+        codex_bin: str = "codex",
+        codex_home: Optional[str] = None,
+        client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
+    ) -> None:
+        self._codex_bin = codex_bin
+        self._codex_home = codex_home
+        self._client_factory = client_factory or CodexAppServerClient
+
+    def _request(self, method: str, params: dict[str, Any], timeout: float) -> dict:
+        client = self._client_factory(
+            codex_bin=self._codex_bin,
+            codex_home=self._codex_home,
+        )
+        try:
+            client.initialize(
+                client_name="hermes",
+                client_title="Hermes Agent",
+                client_version=_get_hermes_version(),
+            )
+            return client.request(method, params, timeout=timeout)
+        finally:
+            client.close()
+
+    def list_threads(
+        self,
+        *,
+        cursor: Optional[str] = None,
+        limit: int = 20,
+        timeout: float = 30.0,
+    ) -> CodexThreadPage:
+        params: dict[str, Any] = {
+            "archived": False,
+            "limit": max(1, int(limit)),
+            "sortKey": "recency_at",
+            "sortDirection": "desc",
+            "sourceKinds": list(self.SOURCE_KINDS),
+        }
+        if cursor:
+            params["cursor"] = cursor
+        result = self._request("thread/list", params, timeout)
+        return CodexThreadPage(
+            threads=[_thread_summary(item) for item in result.get("data", [])],
+            next_cursor=result.get("nextCursor"),
+            backwards_cursor=result.get("backwardsCursor"),
+        )
+
+    def read_thread(
+        self,
+        thread_id: str,
+        *,
+        timeout: float = 30.0,
+    ) -> CodexThreadSummary:
+        result = self._request(
+            "thread/read",
+            {"threadId": str(thread_id), "includeTurns": False},
+            timeout,
+        )
+        thread = result.get("thread") or {}
+        summary = _thread_summary(thread)
+        if not summary.thread_id:
+            raise CodexAppServerError(
+                code=-32603,
+                message="codex thread/read returned no thread id",
+            )
+        return summary
+
+
 # Markers we accept as terminal even when codex never emits turn/completed.
 # Some codex versions stream `<turn_aborted>` as raw text in agentMessage
 # items when an interrupt or upstream error tears the turn down before the
@@ -201,6 +323,7 @@ class CodexAppServerSession:
         self,
         *,
         cwd: Optional[str] = None,
+        resume_thread_id: Optional[str] = None,
         codex_bin: str = "codex",
         codex_home: Optional[str] = None,
         permission_profile: Optional[str] = None,
@@ -210,6 +333,7 @@ class CodexAppServerSession:
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
     ) -> None:
         self._cwd = cwd or os.getcwd()
+        self._resume_thread_id = str(resume_thread_id or "").strip() or None
         self._codex_bin = codex_bin
         self._codex_home = codex_home
         self._permission_profile = (
@@ -251,7 +375,8 @@ class CodexAppServerSession:
             client_title="Hermes Agent",
             client_version=_get_hermes_version(),
         )
-        # Permission selection is intentionally NOT sent on thread/start.
+        # Permission selection is intentionally NOT sent on thread/start or
+        # thread/resume.
         # Two reasons (live-tested against codex 0.130.0):
         #   1. `thread/start.permissions` is gated behind the experimentalApi
         #      capability on this codex version — we'd have to opt in during
@@ -266,8 +391,16 @@ class CodexAppServerSession:
         # codex CLI workflow and avoids fighting codex's own validation.
         # Users who want a write-capable profile configure it in their
         # ~/.codex/config.toml the same way they would for any codex usage.
-        params: dict[str, Any] = {"cwd": self._cwd}
-        result = self._client.request("thread/start", params, timeout=15)
+        if self._resume_thread_id:
+            method = "thread/resume"
+            params: dict[str, Any] = {
+                "threadId": self._resume_thread_id,
+                "cwd": self._cwd,
+            }
+        else:
+            method = "thread/start"
+            params = {"cwd": self._cwd}
+        result = self._client.request(method, params, timeout=15)
         # Cross-fill thread.id/sessionId — different codex versions have
         # serialized this under either key. Mirrors openclaw beta.8's
         # tolerance fix so future codex drops/renames don't KeyError us
@@ -278,18 +411,20 @@ class CodexAppServerSession:
             or thread_obj.get("sessionId")
             or result.get("sessionId")
             or result.get("threadId")
+            or self._resume_thread_id
         )
         if not thread_id:
             raise CodexAppServerError(
                 code=-32603,
                 message=(
-                    "codex thread/start returned no thread id "
+                    f"codex {method} returned no thread id "
                     f"(payload keys: {sorted(result.keys())})"
                 ),
             )
         self._thread_id = thread_id
         logger.info(
-            "codex app-server thread started: id=%s profile=%s cwd=%s",
+            "codex app-server thread %s: id=%s profile=%s cwd=%s",
+            "resumed" if self._resume_thread_id else "started",
             self._thread_id[:8],
             self._permission_profile,
             self._cwd,

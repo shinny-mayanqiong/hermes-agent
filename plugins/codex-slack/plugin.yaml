@@ -1,0 +1,7 @@
+name: codex-slack
+version: "0.1.0"
+description: "Control local Codex app-server sessions from one Slack channel."
+author: "Hermes Agent"
+kind: standalone
+hooks:
+  - pre_gateway_dispatch

@@ -16,6 +16,7 @@ import pytest
 import agent.transports.codex_app_server_session as session_mod
 from agent.transports.codex_app_server_session import (
     CodexAppServerSession,
+    CodexThreadCatalog,
     _ServerRequestRouting,
     _approval_choice_to_codex_decision,
     _coerce_turn_input_text,
@@ -52,6 +53,9 @@ class FakeClient:
         # Sensible defaults for protocol methods used by the session
         if method == "thread/start":
             return {"thread": {"id": "thread-fake-001"},
+                    "activePermissionProfile": {"id": "workspace-write"}}
+        if method == "thread/resume":
+            return {"thread": {"id": params["threadId"]},
                     "activePermissionProfile": {"id": "workspace-write"}}
         if method == "turn/start":
             return {"turn": {"id": "turn-fake-001"}}
@@ -168,6 +172,78 @@ class TestLifecycle:
         s.close()
         s.close()
         assert client._closed is True
+
+    def test_resume_existing_thread(self):
+        client = FakeClient()
+        s = make_session(client, resume_thread_id="thread-existing-123")
+
+        assert s.ensure_started() == "thread-existing-123"
+        method, params = next(r for r in client.requests if r[0] == "thread/resume")
+        assert method == "thread/resume"
+        assert params == {"threadId": "thread-existing-123", "cwd": "/tmp"}
+        assert not any(method == "thread/start" for method, _ in client.requests)
+
+
+class TestThreadCatalog:
+    def test_list_threads_uses_recency_pagination_and_interactive_sources(self):
+        client = FakeClient()
+
+        def handler(method, params):
+            assert method == "thread/list"
+            assert params == {
+                "archived": False,
+                "limit": 20,
+                "sortKey": "recency_at",
+                "sortDirection": "desc",
+                "sourceKinds": ["cli", "vscode", "appServer"],
+                "cursor": "page-2",
+            }
+            return {
+                "data": [{
+                    "id": "thread-1",
+                    "name": None,
+                    "preview": "First prompt\ncontinued",
+                    "cwd": "/tmp/project",
+                    "source": "cli",
+                    "createdAt": 10,
+                    "updatedAt": 20,
+                    "recencyAt": 30,
+                }],
+                "nextCursor": "page-3",
+                "backwardsCursor": "page-1",
+            }
+
+        client._request_handler = handler
+        page = CodexThreadCatalog(client_factory=lambda **_: client).list_threads(
+            cursor="page-2"
+        )
+
+        assert page.next_cursor == "page-3"
+        assert page.backwards_cursor == "page-1"
+        assert page.threads[0].title == "First prompt"
+        assert page.threads[0].recency_at == 30
+        assert client._closed is True
+
+    def test_read_thread_returns_normalized_summary(self):
+        client = FakeClient()
+        client._request_handler = lambda method, params: {
+            "thread": {
+                "sessionId": "thread-read-1",
+                "name": "Named session",
+                "cwd": "/tmp/project",
+                "source": {"custom": "test"},
+                "createdAt": 10,
+                "updatedAt": 20,
+            }
+        }
+
+        summary = CodexThreadCatalog(
+            client_factory=lambda **_: client
+        ).read_thread("thread-read-1")
+
+        assert summary.thread_id == "thread-read-1"
+        assert summary.title == "Named session"
+        assert summary.source_kind == "custom"
 
 
 # ---- turn loop ----
