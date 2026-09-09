@@ -108,7 +108,6 @@ def test_skill_defines_sensitive_confirmed_mcp_workflow():
     assert "exactly one Slack code block" in skill
     assert "Authoritative broker_json" in skill
     assert "Preserve it exactly" in skill
-    assert "does not guarantee that the control plane accepts an empty" in skill
     assert "latest `origin/master`" in skill
     assert "`commit` alone" in skill
     assert "both `branch` and `commit`" in skill
@@ -295,9 +294,20 @@ async def test_active_thread_is_bound_to_skill_and_requester(tmp_path, monkeypat
     )
 
 
+@pytest.mark.parametrize(
+    ("exact_code", "slack_text"),
+    [
+        pytest.param(
+            '[{"trading_fronts":["tcp://front.example:41205"]}]\n',
+            '```\n[{"trading_fronts":["<tcp://front.example:41205>"]}]\n```',
+            id="broker-with-slack-link-rendering",
+        ),
+        pytest.param("[]\n", "```\n[]\n```", id="empty-broker-array"),
+    ],
+)
 @pytest.mark.asyncio
 async def test_active_thread_uses_exact_code_block_instead_of_slack_plain_text(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, exact_code, slack_text
 ):
     plugin = _load_plugin()
     monkeypatch.setattr(plugin, "_state_path", lambda: tmp_path / "state.json")
@@ -306,11 +316,7 @@ async def test_active_thread_uses_exact_code_block_instead_of_slack_plain_text(
 
     await plugin._handle_evaluation_event(_event("/hedge-evaluation-deploy"), gateway)
     thread_ts = adapter.client.messages[0]["ts"]
-    exact_code = '[{"trading_fronts":["tcp://front.example:41205"]}]\n'
-    followup = _event(
-        '```\n[{"trading_fronts":["<tcp://front.example:41205>"]}]\n```',
-        thread_id=thread_ts,
-    )
+    followup = _event(slack_text, thread_id=thread_ts)
     followup.raw_message["blocks"] = [
         {
             "type": "rich_text",

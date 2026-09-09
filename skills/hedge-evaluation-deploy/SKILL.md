@@ -1,6 +1,6 @@
 ---
 name: hedge-evaluation-deploy
-description: Manage the fixed Hedge evaluation environment from Slack by collecting, validating, confirming, and submitting broker.json, Hedge V2 version selectors, and CTP API test mode through the hedge-evaluation-control MCP server. Use when a user asks to deploy, install, update, check, verify, inspect, wait for, retry, or cancel an evaluation-environment operation, including requests started with /hedge-evaluation-deploy.
+description: Deploy and inspect the fixed Hedge environment from Slack.
 ---
 
 # Hedge Evaluation Deploy
@@ -103,7 +103,7 @@ endpoint: {
 
 Apply these checks before asking for confirmation:
 
-1. The input is valid JSON with a top-level array.
+1. The input is valid JSON with a top-level array, including `[]`.
 2. Every required key exists and has the type shown above.
 3. IDs, names, `pinyin_index`, CTP identifiers, auth codes, endpoint names,
    and trading-front strings are non-empty after trimming.
@@ -114,11 +114,14 @@ Apply these checks before asking for confirmation:
 6. Reject comments, trailing commas, placeholder secrets, and fields inferred
    from examples. Ask the user to correct them.
 
-The MCP input schema does not guarantee that the control plane accepts an empty
-array. Do not use a live deployment to probe this. If the user submits `[]`,
-stop before confirmation, explain that empty-broker behavior requires an
-explicit current server contract, and do not claim it will clear configuration
-unless the server contract confirms that behavior.
+The current `deploy_evaluation_environment` contract explicitly accepts
+`broker_json: []` to deploy an environment without brokers. Treat this as a
+complete, valid payload with broker count 0 and continue collecting deployment
+options and confirmation. Do not require at least one broker or ask the user
+to supply another server-contract confirmation. Preserve `[]` in the MCP call;
+do not omit it, substitute `null`, or invent a broker. This allowance applies to
+the top-level array; each supplied broker must still satisfy the nested checks
+above.
 
 ## Collect Deployment Options
 
@@ -156,8 +159,13 @@ After validation, show only a redacted summary:
 - the effective boolean `ctp_api_test_mode`, marking `true` as the default when
   the requester omitted it.
 
+For `[]`, report broker count 0 and explain that the resulting environment will
+have no configured brokers. Include the effective version selection and
+`ctp_api_test_mode` in the same summary, then obtain the normal separate
+confirmation below.
+
 Then say that the fixed evaluation environment will be installed or updated
-and ask the requester to reply exactly `确认部署测评环境`. The deployment request
+and ask the requester to reply exactly `确认部署测评环境`. The confirmation
 must occur in a later user message; an initial “deploy this” message is not the
 confirmation step.
 
