@@ -153,6 +153,11 @@ VALID_HOOKS: Set[str] = {
     #   {"action": "allow"}  /  None             -> normal dispatch
     # Kwargs: event: MessageEvent, gateway: GatewayRunner, session_store.
     "pre_gateway_dispatch",
+    # Gateway-owned background services. Startup runs after adapters connect;
+    # shutdown runs before they disconnect. Async callbacks are awaited.
+    # Kwargs: gateway: GatewayRunner.
+    "on_gateway_start",
+    "on_gateway_stop",
     # Approval lifecycle hooks. Fired by tools/approval.py when a dangerous
     # command needs user approval -- fires BOTH for CLI-interactive prompts
     # and for gateway/ACP approvals (Telegram, Discord, Slack, TUI, etc.).
@@ -1881,6 +1886,20 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     Returns a list of non-``None`` return values from plugin callbacks.
     """
     return get_plugin_manager().invoke_hook(hook_name, **kwargs)
+
+
+async def invoke_hook_async(hook_name: str, **kwargs: Any) -> List[Any]:
+    """Invoke lifecycle observers, awaiting async cleanup before continuing."""
+    results = []
+    for result in invoke_hook(hook_name, **kwargs):
+        try:
+            if inspect.isawaitable(result):
+                result = await result
+            if result is not None:
+                results.append(result)
+        except Exception:
+            logger.warning("Async hook '%s' failed", hook_name, exc_info=True)
+    return results
 
 
 def invoke_middleware(kind: str, **kwargs: Any) -> List[Any]:

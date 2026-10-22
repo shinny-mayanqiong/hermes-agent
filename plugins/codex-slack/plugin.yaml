@@ -5,3 +5,5 @@ author: "Hermes Agent"
 kind: standalone
 hooks:
   - pre_gateway_dispatch
+  - on_gateway_start
+  - on_gateway_stop

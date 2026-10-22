@@ -143,7 +143,7 @@ def _in_progress_turn_id(thread: dict[str, Any]) -> Optional[str]:
 
 
 class CodexThreadCatalog:
-    """Read-only thread/list + thread/read facade over a short-lived client."""
+    """Thread discovery, activity reads and explicit interruption via short-lived clients."""
 
     SOURCE_KINDS = ("cli", "vscode", "appServer")
 
@@ -215,6 +215,55 @@ class CodexThreadCatalog:
                 message="codex thread/read returned no thread id",
             )
         return summary
+
+    def read_activity(self, thread_id: str, *, after_turn_id: str = "") -> dict[str, Any]:
+        """Read live status and recent turns without resuming or changing a thread.
+
+        Include the checkpoint turn again: it may have gained items or finished
+        since the previous read. Page back to it to recover after disconnections.
+        """
+        client = self._client_factory(codex_bin=self._codex_bin, codex_home=self._codex_home)
+        try:
+            client.initialize(client_name="hermes", client_title="Hermes Agent",
+                              client_version=_get_hermes_version())
+            thread = client.request("thread/read", {"threadId": thread_id}, timeout=10)["thread"]
+            turns: list[dict] = []
+            cursor = None
+            while True:
+                params = {"threadId": thread_id, "limit": 20 if cursor else 1,
+                          "sortDirection": "desc", "itemsView": "full"}
+                if cursor:
+                    params["cursor"] = cursor
+                try:
+                    page = client.request("thread/turns/list", params, timeout=10)
+                except CodexAppServerError as exc:
+                    if exc.code == -32600 and "not materialized yet" in exc.message:
+                        thread["turns"] = []
+                        return thread
+                    if exc.code != -32601:
+                        raise
+                    # Older app-servers have no paginated history API.
+                    return client.request("thread/read", {
+                        "threadId": thread_id, "includeTurns": True,
+                    }, timeout=10)["thread"]
+                found = False
+                for turn in page.get("data", []):
+                    turns.append(turn)
+                    if turn.get("id") == after_turn_id:
+                        found = True
+                        break
+                next_cursor = page.get("nextCursor")
+                if found or not after_turn_id or not next_cursor or next_cursor == cursor:
+                    break
+                cursor = next_cursor
+            thread["turns"] = list(reversed(turns))
+            return thread
+        finally:
+            client.close()
+
+    def interrupt_turn(self, thread_id: str, turn_id: str) -> None:
+        """Interrupt a daemon-owned turn, including one started by another client."""
+        self._request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, 10)
 
 
 # Markers we accept as terminal even when codex never emits turn/completed.
@@ -657,6 +706,14 @@ class CodexAppServerSession:
         # fast-fail and retire the session.
         last_tool_completion_at: Optional[float] = None
 
+        def belongs_to_turn(message: dict) -> bool:
+            params = message.get("params") or {}
+            thread_id = params.get("threadId")
+            turn_id = params.get("turnId") or (params.get("turn") or {}).get("id")
+            return (not thread_id or thread_id == result.thread_id) and (
+                not turn_id or not result.turn_id or turn_id == result.turn_id
+            )
+
         while time.monotonic() < deadline and not turn_complete:
             if self._interrupt_event.is_set():
                 self._issue_interrupt(result.turn_id)
@@ -702,6 +759,10 @@ class CodexAppServerSession:
             # reading notifications, so the codex side isn't blocked.
             sreq = self._client.take_server_request(timeout=0)
             if sreq is not None:
+                if not belongs_to_turn(sreq):
+                    # Shared daemons broadcast requests; another turn's owner
+                    # must answer it. Never approve or deny unrelated work.
+                    continue
                 # Drain any pending notifications first so per-turn state
                 # (e.g. _pending_file_changes for fileChange approvals) is
                 # up to date when we make the approval decision. Bounded
@@ -710,6 +771,19 @@ class CodexAppServerSession:
                     pending = self._client.take_notification(timeout=0)
                     if pending is None:
                         break
+                    if not belongs_to_turn(pending):
+                        continue
+                    if self._on_event is not None:
+                        try:
+                            self._on_event(pending)
+                        except Exception:
+                            logger.debug("on_event callback raised", exc_info=True)
+                    if pending.get("method") == "turn/completed":
+                        turn_complete = True
+                        status = (pending.get("params", {}).get("turn") or {}).get("status")
+                        result.interrupted = status == "interrupted"
+                        if status == "failed":
+                            result.error = str((pending["params"]["turn"].get("error") or {}).get("message") or "Codex turn failed")
                     _apply_token_usage_notification(result, pending)
                     self._track_pending_file_change(pending)
                     proj = projector.project(pending)
@@ -737,6 +811,8 @@ class CodexAppServerSession:
                 timeout=notification_poll_timeout
             )
             if note is None:
+                continue
+            if not belongs_to_turn(note):
                 continue
 
             method = note.get("method", "")
@@ -790,7 +866,10 @@ class CodexAppServerSession:
                 turn_status = (
                     (note.get("params") or {}).get("turn") or {}
                 ).get("status")
+                if turn_status == "interrupted":
+                    result.interrupted = True
                 if turn_status and turn_status not in {"completed", "interrupted"}:
+                    result.error = f"Codex turn ended with status: {turn_status}"
                     err_obj = (
                         (note.get("params") or {}).get("turn") or {}
                     ).get("error")

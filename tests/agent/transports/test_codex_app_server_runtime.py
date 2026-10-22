@@ -184,8 +184,9 @@ class TestCodexAppServerModule:
         websocket = FakeWebSocket()
 
         def fake_unix_connect(
-            *, path: str, uri: str, compression: None, open_timeout: int
+            *, path: str, uri: str, compression: None, open_timeout: int, max_size
         ):
+            assert max_size is None  # History/resume responses can exceed 1 MiB.
             captured.update(
                 path=path,
                 uri=uri,

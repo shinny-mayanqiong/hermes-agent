@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 
 from agent.transports.codex_app_server_session import (
     CodexThreadPage,
@@ -38,9 +39,13 @@ def _load_plugin():
     return module
 
 
-@pytest.fixture
-def plugin():
-    return _load_plugin()
+@pytest_asyncio.fixture
+async def plugin():
+    module = _load_plugin()
+    module._test_managers = []
+    yield module
+    for manager in module._test_managers:
+        await manager.shutdown()
 
 
 class FakeSlackClient:
@@ -128,6 +133,16 @@ class FakeCatalog:
     def __init__(self, threads=None):
         self.threads = list(threads or [])
         self.list_calls = []
+        self.activity = {"status": {"type": "idle"}, "turns": []}
+        self.interrupts = []
+
+    def read_activity(self, thread_id, *, after_turn_id=""):
+        del thread_id, after_turn_id
+        import copy
+        return copy.deepcopy(self.activity)
+
+    def interrupt_turn(self, thread_id, turn_id):
+        self.interrupts.append((thread_id, turn_id))
 
     def list_threads(self, **kwargs):
         self.list_calls.append(kwargs)
@@ -160,7 +175,7 @@ class FakeSession:
     def run_turn(self, text):
         if self.on_event:
             self.on_event({"method": "item/started", "params": {"item": {"type": "commandExecution"}}})
-        return TurnResult(final_text=f"answer: {text}", thread_id=self.ensure_started())
+        return TurnResult(final_text=f"answer: {text}", thread_id=self.ensure_started(), turn_id="turn-slack")
 
     def request_interrupt(self):
         self.interrupted = True
@@ -224,6 +239,7 @@ def _manager(plugin, tmp_path, *, threads=None, allowed_root=None):
         session_factory=FakeSession,
     )
     manager.gateway = FakeGateway()
+    plugin._test_managers.append(manager)
     return manager
 
 
@@ -309,7 +325,7 @@ async def test_existing_hermes_slash_routes_to_codex_without_native_manifest(plu
     event = _hermes_codex_event("sessions")
 
     assert manager.pre_dispatch(event, manager.gateway)["action"] == "skip"
-    await manager.handle_event(event)
+    await asyncio.gather(*manager._handlers)
 
     assert "最近的 Codex sessions" in manager.gateway.adapter.client.ephemeral[-1]["text"]
 
@@ -326,7 +342,11 @@ async def test_new_creates_codex_then_root_and_persists_binding(plugin, tmp_path
     assert binding.cwd == manager.config.default_cwd
     assert manager.gateway.adapter.client.messages[0]["channel"] == "C_HOME"
     assert "Codex session 已创建" in manager.gateway.adapter.client.messages[0]["text"]
-    assert FakeSession.instances[0].closed is True
+    assert FakeSession.instances[0].closed is False
+    await manager.enqueue_turn(binding, "first prompt", "U_ME")
+    await manager._runtimes[binding.codex_thread_id].worker
+    assert len(FakeSession.instances) == 1
+    assert manager.gateway.adapter.sent[-1]["text"] == "answer: first prompt"
     assert manager.gateway.adapter.pop_count >= 1
 
 
@@ -528,7 +548,9 @@ def test_register_exposes_command_hook_and_namespaced_actions(plugin):
     plugin.register(ctx)
 
     assert ctx.commands[0][0][0] == "codex"
-    assert ctx.hooks == [("pre_gateway_dispatch", plugin._pre_gateway_dispatch)]
+    assert dict(ctx.hooks)["pre_gateway_dispatch"] == plugin._pre_gateway_dispatch
+    assert dict(ctx.hooks)["on_gateway_start"] == plugin._on_gateway_start
+    assert dict(ctx.hooks)["on_gateway_stop"] == plugin._on_gateway_stop
     assert {item[0] for item in ctx.actions} == {
         plugin.ACTION_PAGE,
         plugin.ACTION_RESUME,
@@ -546,3 +568,135 @@ def test_active_writer_error_is_user_friendly(plugin):
 
     assert "另一个本机 Codex 客户端" in message
     assert "active writer" not in message
+
+
+@pytest.mark.asyncio
+async def test_bound_thread_controls_ignore_injected_slack_history(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+    event = _event("!status", thread_id=binding.thread_ts)
+    event.text = "[Thread context — prior messages:]\nold request\n!status"
+    await manager.handle_event(event)
+    assert "状态：" in manager.gateway.adapter.client.messages[-1]["text"]
+    assert not manager._runtimes
+
+
+@pytest.mark.asyncio
+async def test_bot_mention_and_cached_workspace_route_controls(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+    manager.gateway.adapter._bot_user_id = "U_BOT"
+    manager.gateway.adapter._channel_team = {"C_HOME": "T1"}
+    event = _event("<@U_BOT> !status", thread_id=binding.thread_ts, team="")
+    await manager.handle_event(event)
+    assert "状态：" in manager.gateway.adapter.client.messages[-1]["text"]
+    assert manager._event_text(_event("<@U_OTHER> please review")) == "<@U_OTHER> please review"
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_replies_share_one_worker_and_preserve_order(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+    await manager.enqueue_turn(binding, "first", "U_ME")
+    worker = manager._runtimes[binding.codex_thread_id].worker
+    await manager.enqueue_turn(binding, "second", "U_ME")
+    assert manager._runtimes[binding.codex_thread_id].worker is worker
+    await worker
+    assert [message["text"] for message in manager.gateway.adapter.sent] == [
+        "answer: first", "answer: second",
+    ]
+
+
+def _activity(turn_id, text, status="inProgress"):
+    return {
+        "status": {"type": "active" if status == "inProgress" else "idle"},
+        "turns": [{"id": turn_id, "status": status, "completedAt": int(time.time()) + 1,
+                   "items": [{"type": "agentMessage", "id": "item-1", "text": text}]}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_terminal_progress_and_completion_survive_manager_restart(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+    manager.catalog.activity = _activity("terminal-1", "正在检查调用路径")
+    await manager._sync_binding(binding)
+    assert "正在检查调用路径" in manager.gateway.adapter.client.messages[-1]["text"]
+    progress_ts = manager.gateway.adapter.client.messages[-1]["ts"]
+    await manager._sync_binding(binding)
+    assert len(manager.gateway.adapter.client.messages) == 1
+
+    restarted = _manager(plugin, tmp_path)
+    restarted.gateway = manager.gateway
+    restarted.catalog.activity = _activity("terminal-1", "修复已完成，验证通过", "completed")
+    await restarted._sync_binding(binding)
+    assert restarted.gateway.adapter.client.updates[-1]["ts"] == progress_ts
+    assert restarted.gateway.adapter.sent[-1]["text"] == "修复已完成，验证通过"
+    await restarted._sync_binding(binding)
+    assert len(restarted.gateway.adapter.sent) == 1
+    assert not restarted._runtimes  # Observing never resumes or starts a model turn.
+
+
+@pytest.mark.asyncio
+async def test_sync_retries_failed_slack_delivery_before_marking_done(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+    manager.catalog.activity = _activity("terminal-2", "result", "completed")
+    sender = manager.gateway.adapter.send
+
+    async def fail(*args, **kwargs):
+        return SimpleNamespace(success=False, error="ratelimited")
+
+    manager.gateway.adapter.send = fail
+    with pytest.raises(RuntimeError, match="ratelimited"):
+        await manager._sync_binding(binding)
+    assert not manager.store.progress(binding.codex_thread_id, "terminal-2")["completed"]
+    manager.gateway.adapter.send = sender
+    await manager._sync_binding(binding)
+    assert manager.gateway.adapter.sent[-1]["text"] == "result"
+    assert len(manager.gateway.adapter.client.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_status_and_stop_use_terminal_owned_turn_without_local_worker(plugin, tmp_path):
+    from dataclasses import replace
+    manager = _manager(plugin, tmp_path)
+    manager.config = replace(manager.config, shared_daemon=True)
+    binding = _binding(plugin, manager)
+    manager.catalog.activity = _activity("terminal-active", "正在运行测试")
+    await manager.status(binding)
+    assert "运行中" in manager.gateway.adapter.client.messages[-1]["text"]
+    assert "正在运行测试" in manager.gateway.adapter.client.messages[-1]["text"]
+    await manager.stop(binding)
+    assert manager.catalog.interrupts == [(binding.codex_thread_id, "terminal-active")]
+
+
+@pytest.mark.asyncio
+async def test_sync_seeds_history_and_skips_slack_owned_turns(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+    manager.catalog.activity = _activity("old-turn", "old answer", "completed")
+    await manager._sync_binding(binding, initialize=True)
+    assert not manager.gateway.adapter.sent
+    runtime = manager._runtime(binding)
+    runtime.active = True
+    manager.catalog.activity = _activity("slack-turn", "in flight")
+    await manager._sync_binding(binding)
+    assert not manager.gateway.adapter.client.messages
+    runtime.active = False
+
+
+@pytest.mark.asyncio
+async def test_interrupted_turn_is_not_reported_as_completed(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+
+    class InterruptedSession(FakeSession):
+        def run_turn(self, text):
+            return TurnResult(interrupted=True, thread_id=binding.codex_thread_id, turn_id="interrupted")
+
+    manager.session_factory = InterruptedSession
+    await manager.enqueue_turn(binding, "work", "U_ME")
+    await manager._runtimes[binding.codex_thread_id].worker
+    assert "已中断" in manager.gateway.adapter.client.updates[-1]["text"]
+    assert not manager.gateway.adapter.sent

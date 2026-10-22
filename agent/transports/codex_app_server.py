@@ -138,6 +138,9 @@ class CodexAppServerClient:
                 uri="ws://localhost/rpc",
                 compression=None,
                 open_timeout=10,
+                # Local thread/resume and history responses routinely exceed
+                # websockets' 1 MiB default. Match the stdio transport here.
+                max_size=None,
             )
         else:
             self._proc = subprocess.Popen(

@@ -29,6 +29,7 @@ from hermes_constants import get_hermes_home
 from hermes_cli.config import load_config
 
 from .store import Binding, BindingConflict, BindingStore  # type: ignore[unresolved-import]
+from .progress import ProgressMirror, activity_text, turn_progress
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class PluginConfig:
     approval_timeout_seconds: int = 600
     shared_daemon: bool = False
     daemon_socket: str = ""
+    progress_poll_seconds: int = 5
 
 
 @dataclass
@@ -91,6 +93,8 @@ class _Runtime:
     last_active: float = field(default_factory=time.monotonic)
     progress_ts: str = ""
     progress_updated_at: float = 0.0
+    progress_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    has_history: bool = True
 
 
 def _load_plugin_config() -> PluginConfig:
@@ -137,6 +141,7 @@ def _load_plugin_config() -> PluginConfig:
         approval_timeout_seconds=positive_int("approval_timeout_seconds", 600),
         shared_daemon=boolean("shared_daemon", False),
         daemon_socket=daemon_socket,
+        progress_poll_seconds=positive_int("progress_poll_seconds", 5),
     )
 
 
@@ -168,6 +173,17 @@ def _team_id(event: Any) -> str:
     return str(team or "")
 
 
+def _event_text(event: Any, *, bot_user_id: str = "") -> str:
+    """Codex already owns history; do not feed Slack's injected transcript back."""
+    raw = _raw_message(event)
+    if not raw.get("command") and isinstance(raw.get("text"), str):
+        text = raw["text"].strip()
+        if bot_user_id and text.startswith(f"<@{bot_user_id}>"):
+            text = text[len(bot_user_id) + 3:].strip()
+        return text
+    return str(getattr(event, "text", "") or "").strip()
+
+
 def _command_args(text: str) -> Optional[str]:
     stripped = str(text or "").strip()
     lowered = stripped.lower()
@@ -179,9 +195,9 @@ def _command_args(text: str) -> Optional[str]:
     return None
 
 
-def _event_command_args(event: Any) -> Optional[str]:
+def _event_command_args(event: Any, text: Optional[str] = None) -> Optional[str]:
     """Accept native /codex and the already-installed /hermes fallback."""
-    text = str(getattr(event, "text", "") or "")
+    text = _event_text(event) if text is None else text
     direct = _command_args(text)
     if direct is not None:
         return direct
@@ -216,7 +232,7 @@ def _friendly_codex_error(exc: Exception) -> str:
     return f"Codex 操作失败：{message}"
 
 
-class CodexSlackManager:
+class CodexSlackManager(ProgressMirror):
     def __init__(
         self,
         *,
@@ -246,6 +262,10 @@ class CodexSlackManager:
         self._approvals: dict[str, _PendingApproval] = {}
         self._action_lock = threading.RLock()
         self._reaper: Optional[asyncio.Task] = None
+        self._monitor: Optional[asyncio.Task] = None
+        self._handlers: set[asyncio.Task] = set()
+        self._shutting_down = False
+        self._mirror_locks: dict[str, asyncio.Lock] = {}
 
     # ---------- gateway + Slack helpers ----------
 
@@ -262,6 +282,20 @@ class CodexSlackManager:
     def _adapter(self, gateway: Any = None) -> Any:
         gateway = gateway or self.gateway
         return gateway.adapters.get(Platform.SLACK) if gateway is not None else None
+
+    def _event_team_id(self, event: Any) -> str:
+        team = _team_id(event)
+        if team:
+            return team
+        channel_id = str(getattr(getattr(event, "source", None), "chat_id", "") or "")
+        return str(getattr(self._adapter(), "_channel_team", {}).get(channel_id, ""))
+
+    def _event_text(self, event: Any) -> str:
+        adapter = self._adapter()
+        bot_id = getattr(adapter, "_team_bot_user_ids", {}).get(
+            self._event_team_id(event), getattr(adapter, "_bot_user_id", "")
+        )
+        return _event_text(event, bot_user_id=bot_id)
 
     @staticmethod
     def _client(adapter: Any, channel_id: str) -> Any:
@@ -330,18 +364,22 @@ class CodexSlackManager:
             kwargs["thread_ts"] = thread_ts
         return _slack_data(await client.chat_postEphemeral(**kwargs))
 
-    async def _edit_message(self, channel_id: str, message_ts: str, text: str) -> None:
+    async def _edit_message(self, channel_id: str, message_ts: str, text: str, *, strict: bool = False) -> None:
         if not message_ts:
             return
         adapter = self._adapter()
         client = self._client(adapter, channel_id)
         if client is None:
+            if strict:
+                raise RuntimeError("Slack client is not available")
             return
         formatter = getattr(adapter, "format_message", None)
         rendered = formatter(text) if callable(formatter) else text
         try:
             await client.chat_update(channel=channel_id, ts=message_ts, text=rendered)
         except Exception:
+            if strict:
+                raise
             logger.debug("[codex-slack] Slack progress update failed", exc_info=True)
 
     def _discard_slash_context(self, channel_id: str) -> None:
@@ -430,14 +468,28 @@ class CodexSlackManager:
                 )
                 return existing
 
+        if not resumed:
+            await self._prune_runtimes(reserve_slot=True)
+            if self._live_runtime_count() >= self.config.max_live_sessions:
+                raise ValueError("Codex session 数量已达上限，请先完成或停止一个 session。")
+
         # Prove that the app-server can start/resume before publishing a root.
+        runtime = None
+        loop = asyncio.get_running_loop()
         session = self.session_factory(
             cwd=summary.cwd,
             resume_thread_id=summary.thread_id if resumed else None,
+            approval_callback=lambda *args, **kwargs: (
+                self._approval_callback(runtime.binding, loop)(*args, **kwargs) if runtime else "deny"
+            ),
+            on_event=lambda note: self._on_codex_event(runtime, loop, note) if runtime else None,
         )
         try:
             thread_id = await asyncio.to_thread(session.ensure_started)
-        finally:
+        except BaseException:
+            await asyncio.to_thread(session.close)
+            raise
+        if resumed:
             await asyncio.to_thread(session.close)
         summary = CodexThreadSummary(
             thread_id=thread_id,
@@ -457,9 +509,16 @@ class CodexSlackManager:
                 "直接在此 thread 回复即可继续；`!status` 查看状态，`!stop` 停止并释放进程。",
             ]
         )
-        response = await self._post_message(channel_id, root_text)
+        try:
+            response = await self._post_message(channel_id, root_text)
+        except BaseException:
+            if not resumed:
+                await asyncio.to_thread(session.close)
+            raise
         thread_ts = str(response.get("ts") or "")
         if not thread_ts:
+            if not resumed:
+                await asyncio.to_thread(session.close)
             raise RuntimeError("Slack did not return a root message timestamp")
         now = time.time()
         binding = Binding(
@@ -475,6 +534,8 @@ class CodexSlackManager:
         try:
             self.store.create(binding)
         except BindingConflict:
+            if not resumed:
+                await asyncio.to_thread(session.close)
             winner = self.store.by_codex(summary.thread_id)
             if winner:
                 await self._post_message(
@@ -484,6 +545,18 @@ class CodexSlackManager:
                 )
                 return winner
             raise
+        if not resumed:
+            # An empty thread has no rollout yet. Keep its creating connection
+            # alive until the first prompt instead of attempting to resume it.
+            runtime = self._runtime(binding)
+            runtime.session = session
+            runtime.has_history = False
+        if self.config.shared_daemon:
+            try:
+                await self._sync_binding(binding, initialize=True)
+            except Exception:
+                logger.warning("Unable to seed Codex progress; will retry", exc_info=True)
+            self.start(self.gateway)
         self._discard_slash_context(channel_id)
         await self._post_ephemeral(
             channel_id,
@@ -526,7 +599,7 @@ class CodexSlackManager:
             )
             return
 
-        args = _event_command_args(event)
+        args = _event_command_args(event, self._event_text(event))
         try:
             argv = shlex.split(args or "")
         except ValueError as exc:
@@ -558,7 +631,7 @@ class CodexSlackManager:
             try:
                 await self._bind_thread(
                     summary=summary,
-                    team_id=_team_id(event),
+                    team_id=self._event_team_id(event),
                     channel_id=channel_id,
                     user_id=user_id,
                     resumed=False,
@@ -570,7 +643,7 @@ class CodexSlackManager:
         if command == "resume" and len(argv) >= 2:
             await self.resume_by_id(
                 argv[1],
-                team_id=_team_id(event),
+                team_id=self._event_team_id(event),
                 channel_id=channel_id,
                 user_id=user_id,
                 cwd_override=" ".join(argv[2:]) or None,
@@ -763,7 +836,7 @@ class CodexSlackManager:
     async def _prune_runtimes(self, *, reserve_slot: bool = False) -> None:
         now = time.monotonic()
         for key, runtime in list(self._runtimes.items()):
-            if not runtime.active and now - runtime.last_active >= self.config.idle_timeout_seconds:
+            if runtime.has_history and not runtime.active and now - runtime.last_active >= self.config.idle_timeout_seconds:
                 await self._close_runtime(runtime)
                 self._runtimes.pop(key, None)
         def over_limit() -> bool:
@@ -776,7 +849,7 @@ class CodexSlackManager:
 
         while over_limit():
             victim_key = next(
-                (key for key, runtime in self._runtimes.items() if not runtime.active and runtime.session is not None),
+                (key for key, runtime in self._runtimes.items() if runtime.has_history and not runtime.active and runtime.session is not None),
                 None,
             )
             if victim_key is None:
@@ -808,6 +881,9 @@ class CodexSlackManager:
     async def enqueue_turn(self, binding: Binding, text: str, user_id: str) -> None:
         self._ensure_reaper()
         runtime = self._runtime(binding)
+        if runtime.stopping or self._shutting_down:
+            await self._post_message(binding.channel_id, "正在停止，请稍后重试。", thread_ts=binding.thread_ts)
+            return
         waiting = len(runtime.queue)
         if runtime.active and waiting >= self.config.queue_limit:
             await self._post_message(
@@ -824,6 +900,9 @@ class CodexSlackManager:
                 thread_ts=binding.thread_ts,
             )
             return
+        # Reserve ownership before yielding so simultaneous replies cannot
+        # start two workers against one app-server connection.
+        runtime.active = True
         runtime.worker = asyncio.create_task(self._run_queue(runtime))
 
     async def _ensure_session(self, runtime: _Runtime) -> bool:
@@ -851,6 +930,11 @@ class CodexSlackManager:
         try:
             while runtime.queue and not runtime.stopping:
                 item = runtime.queue.popleft()
+                # Let an already-running mirror delivery finish before this
+                # worker becomes the sole sender for the session.
+                lock = self._mirror_locks.setdefault(runtime.binding.codex_thread_id, asyncio.Lock())
+                async with lock:
+                    pass
                 if not await self._ensure_session(runtime):
                     runtime.queue.clear()
                     break
@@ -864,19 +948,23 @@ class CodexSlackManager:
                 session = runtime.session
                 assert session is not None
                 result = await asyncio.to_thread(session.run_turn, item.text)
+                runtime.has_history = bool(result.turn_id) or runtime.has_history
                 runtime.last_active = time.monotonic()
                 self.store.touch(runtime.binding)
                 if runtime.stopping:
                     break
-                if result.error:
+                async with runtime.progress_lock:
+                    # Serialize final status with any queued progress edit.
+                    runtime.progress_updated_at = float("inf")
+                if result.error or result.interrupted:
                     await self._edit_message(
                         runtime.binding.channel_id,
                         runtime.progress_ts,
-                        "⚠️ Codex turn 未完成。",
+                        "⏹ Codex 已中断。" if result.interrupted else "⚠️ Codex turn 未完成。",
                     )
                     await self._post_message(
                         runtime.binding.channel_id,
-                        result.error,
+                        result.error or "Codex 已中断。",
                         thread_ts=runtime.binding.thread_ts,
                     )
                 else:
@@ -886,10 +974,19 @@ class CodexSlackManager:
                         "✅ Codex 已完成。",
                     )
                     await self._send_final(runtime.binding, result.final_text or "Codex 已完成，但没有返回文本。")
+                if result.turn_id and self.config.shared_daemon:
+                    self.store.save_progress(runtime.binding.codex_thread_id, result.turn_id,
+                                             message_ts=runtime.progress_ts, completed=True)
                 if result.should_retire:
                     await self._close_runtime(runtime)
         except Exception as exc:
+            if runtime.stopping:
+                return
             logger.exception("[codex-slack] Codex worker failed")
+            runtime.queue.clear()
+            async with runtime.progress_lock:
+                runtime.progress_updated_at = float("inf")
+                await self._edit_message(runtime.binding.channel_id, runtime.progress_ts, "⚠️ Codex 运行失败。")
             await self._post_message(
                 runtime.binding.channel_id,
                 f"Codex 运行失败：{exc}",
@@ -902,7 +999,8 @@ class CodexSlackManager:
             runtime.last_active = time.monotonic()
             if runtime.stopping:
                 await self._close_runtime(runtime)
-                self._runtimes.pop(runtime.binding.codex_thread_id, None)
+                if self._runtimes.get(runtime.binding.codex_thread_id) is runtime:
+                    self._runtimes.pop(runtime.binding.codex_thread_id, None)
 
     async def _send_final(self, binding: Binding, text: str) -> None:
         adapter = self._adapter()
@@ -914,7 +1012,9 @@ class CodexSlackManager:
                 metadata={"thread_id": binding.thread_ts, "thread_ts": binding.thread_ts},
             )
             if asyncio.iscoroutine(result):
-                await result
+                result = await result
+            if getattr(result, "success", True) is False:
+                raise RuntimeError(getattr(result, "error", None) or "Slack delivery failed")
             return
         await self._post_message(binding.channel_id, text, thread_ts=binding.thread_ts)
 
@@ -923,29 +1023,40 @@ class CodexSlackManager:
         if method not in {"item/started", "item/completed"}:
             return
         item = (note.get("params") or {}).get("item") or {}
-        item_type = str(item.get("type") or "work")
-        state = "运行" if method.endswith("started") else "完成"
-        label = {
-            "commandExecution": "命令",
-            "fileChange": "文件修改",
-            "mcpToolCall": "工具调用",
-        }.get(item_type, "步骤")
+        if item.get("type") not in {"commandExecution", "fileChange", "mcpToolCall", "agentMessage", "plan"}:
+            return
+        text = "⏳ " + turn_progress({"items": [item]})
+        progress_ts = runtime.progress_ts
 
         def schedule() -> None:
-            asyncio.create_task(self._update_progress(runtime, f"⏳ {label}{state}…"))
+            asyncio.create_task(self._update_progress(runtime, text, progress_ts=progress_ts))
 
         loop.call_soon_threadsafe(schedule)
 
-    async def _update_progress(self, runtime: _Runtime, text: str) -> None:
-        now = time.monotonic()
-        if now - runtime.progress_updated_at < 1.0:
-            return
-        runtime.progress_updated_at = now
-        await self._edit_message(runtime.binding.channel_id, runtime.progress_ts, text)
+    async def _update_progress(self, runtime: _Runtime, text: str, *, progress_ts: str = "") -> None:
+        async with runtime.progress_lock:
+            if not runtime.active or runtime.stopping or (progress_ts and progress_ts != runtime.progress_ts):
+                return
+            now = time.monotonic()
+            if now - runtime.progress_updated_at < 1.0:
+                return
+            runtime.progress_updated_at = now
+            await self._edit_message(runtime.binding.channel_id, runtime.progress_ts, text)
 
     async def status(self, binding: Binding) -> None:
         runtime = self._runtimes.get(binding.codex_thread_id)
-        if runtime and runtime.active:
+        detail = ""
+        if self.config.shared_daemon:
+            try:
+                snapshot = await asyncio.to_thread(self.catalog.read_activity, binding.codex_thread_id)
+                state = activity_text(snapshot)
+                turns = snapshot.get("turns") or []
+                if turns:
+                    detail = "\n最近进展：" + turn_progress(turns[-1])
+            except Exception as exc:
+                state = "无法连接 Codex（状态未知）"
+                detail = f"\n{exc}"
+        elif runtime and runtime.active:
             state = "运行中"
         elif runtime and runtime.session is not None:
             state = "空闲（进程已缓存）"
@@ -954,12 +1065,22 @@ class CodexSlackManager:
         queued = len(runtime.queue) if runtime else 0
         await self._post_message(
             binding.channel_id,
-            f"状态：*{state}*\nCodex ID：`{binding.codex_thread_id}`\n目录：`{binding.cwd}`\n排队：{queued}",
+            f"状态：*{state}*\nCodex ID：`{binding.codex_thread_id}`\n目录：`{binding.cwd}`\n排队：{queued}{detail}",
             thread_ts=binding.thread_ts,
         )
 
     async def stop(self, binding: Binding) -> None:
         runtime = self._runtimes.get(binding.codex_thread_id)
+        if self.config.shared_daemon and not (runtime and runtime.active):
+            try:
+                snapshot = await asyncio.to_thread(self.catalog.read_activity, binding.codex_thread_id)
+                for turn in reversed(snapshot.get("turns") or []):
+                    if turn.get("status") == "inProgress":
+                        await asyncio.to_thread(self.catalog.interrupt_turn, binding.codex_thread_id, turn["id"])
+                        break
+            except Exception as exc:
+                await self._post_message(binding.channel_id, f"无法确认 Codex 已停止：{exc}", thread_ts=binding.thread_ts)
+                return
         if runtime is None:
             await self._post_message(
                 binding.channel_id,
@@ -1140,8 +1261,8 @@ class CodexSlackManager:
         source = getattr(event, "source", None)
         channel_id = str(getattr(source, "chat_id", "") or "")
         user_id = str(getattr(source, "user_id", "") or "")
-        text = str(getattr(event, "text", "") or "").strip()
-        command_args = _event_command_args(event)
+        text = self._event_text(event)
+        command_args = _event_command_args(event, text)
         if command_args is not None:
             await self.handle_command(event)
             return
@@ -1149,7 +1270,7 @@ class CodexSlackManager:
         if not thread_ts:
             await self._post_ephemeral(channel_id, user_id, self.usage())
             return
-        binding = self.store.by_slack(_team_id(event), channel_id, thread_ts)
+        binding = self.store.by_slack(self._event_team_id(event), channel_id, thread_ts)
         if binding is None:
             return
         lowered = text.lower()
@@ -1167,10 +1288,12 @@ class CodexSlackManager:
         if _platform_value(source) != "slack":
             return None
         self.gateway = gateway
+        if self._shutting_down:
+            return None
         channel_id = str(getattr(source, "chat_id", "") or "")
         home_channel = self._home_channel(gateway)
-        text = str(getattr(event, "text", "") or "")
-        command = _event_command_args(event) is not None
+        text = self._event_text(event)
+        command = _event_command_args(event, text) is not None
         if command:
             self._schedule(event)
             return {"action": "skip", "reason": "codex-slack-command"}
@@ -1178,7 +1301,7 @@ class CodexSlackManager:
             return None
         thread_ts = str(getattr(source, "thread_id", "") or "")
         if thread_ts:
-            binding = self.store.by_slack(_team_id(event), channel_id, thread_ts)
+            binding = self.store.by_slack(self._event_team_id(event), channel_id, thread_ts)
             if binding is None:
                 return None
             self._schedule(event)
@@ -1198,8 +1321,12 @@ class CodexSlackManager:
             logger.debug("[codex-slack] No running event loop; event was not scheduled")
             return
         task = loop.create_task(runner())
+        self._handlers.add(task)
 
         def done(finished: asyncio.Task) -> None:
+            self._handlers.discard(finished)
+            if finished.cancelled():
+                return
             try:
                 finished.result()
             except Exception:
@@ -1220,6 +1347,15 @@ def _manager() -> CodexSlackManager:
 
 def _pre_gateway_dispatch(event: Any, gateway: Any, **_: Any) -> Optional[dict[str, str]]:
     return _manager().pre_dispatch(event, gateway)
+
+
+def _on_gateway_start(gateway: Any, **_: Any) -> None:
+    _manager().start(gateway)
+
+
+async def _on_gateway_stop(**_: Any) -> None:
+    if _MANAGER is not None:
+        await _MANAGER.shutdown()
 
 
 def _usage(raw_args: str) -> str:
@@ -1248,6 +1384,8 @@ def register(ctx) -> None:
         platforms=("slack",),
     )
     ctx.register_hook("pre_gateway_dispatch", _pre_gateway_dispatch)
+    ctx.register_hook("on_gateway_start", _on_gateway_start)
+    ctx.register_hook("on_gateway_stop", _on_gateway_stop)
     for action_id in (
         ACTION_PAGE,
         ACTION_RESUME,

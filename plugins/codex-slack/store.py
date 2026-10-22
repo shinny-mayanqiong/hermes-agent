@@ -60,6 +60,15 @@ class BindingStore:
             );
             CREATE INDEX IF NOT EXISTS idx_codex_slack_last_used
             ON bindings(last_used_at DESC);
+
+            CREATE TABLE IF NOT EXISTS progress (
+                codex_thread_id TEXT NOT NULL REFERENCES bindings(codex_thread_id) ON DELETE CASCADE,
+                turn_id TEXT NOT NULL,
+                message_ts TEXT NOT NULL DEFAULT '',
+                digest TEXT NOT NULL DEFAULT '',
+                completed INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (codex_thread_id, turn_id)
+            );
             """
         )
         return conn
@@ -159,6 +168,38 @@ class BindingStore:
                 WHERE team_id=? AND channel_id=? AND thread_ts=?
                 """,
                 (time.time(), binding.team_id, binding.channel_id, binding.thread_ts),
+            )
+
+    def in_channel(self, channel_id: str) -> list[Binding]:
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM bindings WHERE channel_id=? ORDER BY last_used_at DESC",
+                (channel_id,),
+            ).fetchall()
+        return [self._binding(row) for row in rows]
+
+    def progress(self, thread_id: str, turn_id: str = "") -> Optional[dict]:
+        with self._lock, self._connection() as conn:
+            if turn_id:
+                row = conn.execute(
+                    "SELECT * FROM progress WHERE codex_thread_id=? AND turn_id=?",
+                    (thread_id, turn_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM progress WHERE codex_thread_id=? ORDER BY rowid DESC LIMIT 1",
+                    (thread_id,),
+                ).fetchone()
+        return dict(row) if row else None
+
+    def save_progress(self, thread_id: str, turn_id: str, *, message_ts: str = "",
+                      digest: str = "", completed: bool = False) -> None:
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """INSERT INTO progress(codex_thread_id, turn_id, message_ts, digest, completed)
+                   VALUES (?, ?, ?, ?, ?) ON CONFLICT(codex_thread_id, turn_id) DO UPDATE SET
+                   message_ts=excluded.message_ts, digest=excluded.digest, completed=excluded.completed""",
+                (thread_id, turn_id, message_ts, digest, int(completed)),
             )
 
     def delete(self, binding: Binding) -> None:

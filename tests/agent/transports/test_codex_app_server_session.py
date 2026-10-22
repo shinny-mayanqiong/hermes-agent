@@ -143,6 +143,27 @@ class TestTurnInputCoercion:
 # ---- lifecycle ----
 
 class TestLifecycle:
+    @pytest.mark.parametrize("status, interrupted, failed", [
+        ("completed", False, False), ("interrupted", True, False), ("failed", False, True),
+    ])
+    def test_terminal_status_and_unrelated_events(self, status, interrupted, failed):
+        client = FakeClient()
+        events = []
+        client.queue_notification("turn/completed", threadId="other-thread",
+                                  turn={"id": "turn-fake-001", "status": "completed"})
+        client.queue_notification("turn/completed", threadId="thread-fake-001",
+                                  turn={"id": "old-turn", "status": "completed"})
+        client.queue_notification("item/completed", threadId="other-thread", turnId="turn-fake-001",
+                                  item={"type": "agentMessage", "id": "other", "text": "wrong answer"})
+        client.queue_notification("turn/completed", threadId="thread-fake-001",
+                                  turn={"id": "turn-fake-001", "status": status})
+        session = make_session(client, on_event=events.append)
+        result = session.run_turn("hello", turn_timeout=1)
+        assert len(events) == 1
+        assert result.final_text == ""
+        assert result.interrupted is interrupted
+        assert bool(result.error) is failed
+
     def test_ensure_started_is_idempotent(self):
         client = FakeClient()
         s = make_session(client)
@@ -231,6 +252,38 @@ class TestLifecycle:
 
 
 class TestThreadCatalog:
+    def test_activity_pages_back_to_checkpoint_without_resuming(self):
+        client = FakeClient()
+
+        def handler(method, params):
+            if method == "thread/read":
+                assert not params.get("includeTurns")
+                return {"thread": {"id": "thread", "status": {"type": "active"}}}
+            assert method == "thread/turns/list"
+            if not params.get("cursor"):
+                return {"data": [{"id": "new"}], "nextCursor": "older"}
+            return {"data": [{"id": "checkpoint"}, {"id": "old"}]}
+
+        client._request_handler = handler
+        catalog = CodexThreadCatalog(client_factory=lambda **kw: client)
+        snapshot = catalog.read_activity("thread", after_turn_id="checkpoint")
+        assert [turn["id"] for turn in snapshot["turns"]] == ["checkpoint", "new"]
+        assert snapshot["status"]["type"] == "active"
+        assert client._closed
+
+    def test_activity_of_new_unmaterialized_thread_is_empty(self):
+        from agent.transports.codex_app_server import CodexAppServerError
+        client = FakeClient()
+
+        def handler(method, params):
+            if method == "thread/read":
+                return {"thread": {"id": "new", "status": {"type": "idle"}}}
+            raise CodexAppServerError(-32600, "thread new is not materialized yet")
+
+        client._request_handler = handler
+        catalog = CodexThreadCatalog(client_factory=lambda **kw: client)
+        assert catalog.read_activity("new")["turns"] == []
+
     def test_list_threads_uses_recency_pagination_and_interactive_sources(self):
         client = FakeClient()
 
@@ -297,16 +350,16 @@ class TestThreadCatalog:
 class TestRunTurn:
     def test_simple_text_turn_returns_final_message(self):
         client = FakeClient()
-        client.queue_notification("turn/started", threadId="t", turn={"id": "tu1"})
+        client.queue_notification("turn/started", threadId="thread-fake-001", turn={"id": "turn-fake-001"})
         client.queue_notification(
             "item/completed",
             item={"type": "agentMessage", "id": "m1", "text": "hello world"},
-            threadId="t", turnId="tu1",
+            threadId="thread-fake-001", turnId="turn-fake-001",
         )
         client.queue_notification(
             "turn/completed",
-            threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
         s = make_session(client)
         r = s.run_turn("hi", turn_timeout=2.0)
@@ -344,8 +397,8 @@ class TestRunTurn:
         )
         client.queue_notification(
             "turn/completed",
-            threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
         r = make_session(client).run_turn("hi", turn_timeout=2.0)
         assert r.token_usage_last["totalTokens"] == 130
@@ -356,8 +409,8 @@ class TestRunTurn:
         client = FakeClient()
         client.queue_notification(
             "turn/completed",
-            threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
         s = make_session(client)
         r = s.run_turn(
@@ -393,16 +446,16 @@ class TestRunTurn:
                     "status": "completed", "aggregatedOutput": "ok",
                     "exitCode": 0, "commandActions": [],
                 },
-                threadId="t", turnId="tu1",
+                threadId="thread-fake-001", turnId="turn-fake-001",
             )
         client.queue_notification(
             "item/completed",
             item={"type": "agentMessage", "id": "m1", "text": "done"},
-            threadId="t", turnId="tu1",
+            threadId="thread-fake-001", turnId="turn-fake-001",
         )
         client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            "turn/completed", threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
         s = make_session(client)
         r = s.run_turn("do stuff", turn_timeout=2.0)
@@ -515,7 +568,7 @@ class TestRunTurn:
                   "cwd": "/", "status": "inProgress",
                   "aggregatedOutput": None, "exitCode": None,
                   "commandActions": []},
-            threadId="t", turnId="tu1",
+            threadId="thread-fake-001", turnId="turn-fake-001",
         )
         s = make_session(client)
         s.ensure_started()
@@ -559,8 +612,8 @@ class TestRunTurn:
     def test_failed_turn_records_error_from_turn_completed(self):
         client = FakeClient()
         client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "failed",
+            "turn/completed", threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "failed",
                   "error": {"message": "model error"}},
         )
         s = make_session(client)
@@ -578,8 +631,8 @@ class TestServerRequestRouting:
             command="ls /tmp", cwd="/tmp",
         )
         client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            "turn/completed", threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
 
         captured: dict = {}
@@ -600,8 +653,8 @@ class TestServerRequestRouting:
         client.queue_server_request("item/commandExecution/requestApproval", request_id="req-1",
                                     command="rm -rf /", cwd="/")
         client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            "turn/completed", threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
         s = make_session(client)  # no approval_callback wired
         s.run_turn("hi", turn_timeout=1.0)
@@ -612,14 +665,14 @@ class TestServerRequestRouting:
         client.queue_server_request(
             "item/fileChange/requestApproval", request_id="req-2",
             itemId="fc-1",
-            turnId="t1",
-            threadId="th",
+            turnId="turn-fake-001",
+            threadId="thread-fake-001",
             startedAtMs=1234567890,
             reason="create new file with hello() function",
         )
         client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            "turn/completed", threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
 
         def cb(command, description, *, allow_permanent=True):
@@ -633,8 +686,8 @@ class TestServerRequestRouting:
         client = FakeClient()
         client.queue_server_request("totally/unknown", request_id="req-3")
         client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            "turn/completed", threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
         s = make_session(client)
         s.run_turn("hi", turn_timeout=1.0)
@@ -650,15 +703,15 @@ class TestServerRequestRouting:
         client = FakeClient()
         client.queue_server_request(
             "mcpServer/elicitation/request", request_id="elic-1",
-            threadId="t", turnId="tu1",
+            threadId="thread-fake-001", turnId="turn-fake-001",
             serverName="hermes-tools",
             mode="form",
             message="confirm",
             requestedSchema={"type": "object", "properties": {}},
         )
         client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            "turn/completed", threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
         s = make_session(client)
         s.run_turn("hi", turn_timeout=1.0)
@@ -670,15 +723,15 @@ class TestServerRequestRouting:
         client = FakeClient()
         client.queue_server_request(
             "mcpServer/elicitation/request", request_id="elic-2",
-            threadId="t", turnId="tu1",
+            threadId="thread-fake-001", turnId="turn-fake-001",
             serverName="some-third-party",
             mode="url",
             message="please log in",
             url="https://example.com/oauth",
         )
         client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            "turn/completed", threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
         s = make_session(client)
         s.run_turn("hi", turn_timeout=1.0)
@@ -689,8 +742,8 @@ class TestServerRequestRouting:
         client.queue_server_request("item/commandExecution/requestApproval", request_id="r1",
                                     command="ls", cwd="/")
         client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            "turn/completed", threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
         # No callback, but routing says auto-approve. Should approve.
         s = make_session(client, request_routing=_ServerRequestRouting(
@@ -703,8 +756,8 @@ class TestServerRequestRouting:
         client.queue_server_request("item/commandExecution/requestApproval", request_id="r1",
                                     command="ls", cwd="/")
         client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            "turn/completed", threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
 
         def boom(*a, **kw):
@@ -731,8 +784,8 @@ class TestApprovalPromptEnrichment:
             command="ls",  # no cwd
         )
         client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            "turn/completed", threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
         captured = {}
         def cb(command, description, *, allow_permanent=True):
@@ -756,17 +809,17 @@ class TestApprovalPromptEnrichment:
                       {"kind": {"type": "add"}, "path": "/tmp/new.py"},
                       {"kind": {"type": "update"}, "path": "/tmp/old.py"},
                   ]},
-            threadId="t", turnId="tu1",
+            threadId="thread-fake-001", turnId="turn-fake-001",
         )
         client.queue_server_request(
             "item/fileChange/requestApproval", request_id="req-2",
-            itemId="fc-1", turnId="tu1", threadId="t",
+            itemId="fc-1", turnId="turn-fake-001", threadId="thread-fake-001",
             startedAtMs=1234567890,
             reason="add and update files",
         )
         client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            "turn/completed", threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
         captured = {}
         def cb(command, description, *, allow_permanent=True):
@@ -788,13 +841,13 @@ class TestApprovalPromptEnrichment:
         client = FakeClient()
         client.queue_server_request(
             "item/fileChange/requestApproval", request_id="req-2",
-            itemId="fc-orphan", turnId="tu1", threadId="t",
+            itemId="fc-orphan", turnId="turn-fake-001", threadId="thread-fake-001",
             startedAtMs=1234567890,
             reason="apply some changes",
         )
         client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            "turn/completed", threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
         captured = {}
         def cb(command, description, *, allow_permanent=True):
@@ -840,11 +893,11 @@ class TestSessionRetirement:
         client.queue_notification(
             "item/completed",
             item={"type": "agentMessage", "id": "m1", "text": "hi"},
-            threadId="t", turnId="tu1",
+            threadId="thread-fake-001", turnId="turn-fake-001",
         )
         client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            "turn/completed", threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
         s = make_session(client)
         r = s.run_turn("hi", turn_timeout=1.0)
@@ -863,7 +916,7 @@ class TestSessionRetirement:
                 "status": "completed", "aggregatedOutput": "hi",
                 "exitCode": 0, "commandActions": [],
             },
-            threadId="t", turnId="tu1",
+            threadId="thread-fake-001", turnId="turn-fake-001",
         )
         s = make_session(client)
         r = s.run_turn(
@@ -888,7 +941,7 @@ class TestSessionRetirement:
                 "status": "completed", "aggregatedOutput": "hi",
                 "exitCode": 0, "commandActions": [],
             },
-            threadId="t", turnId="tu1",
+            threadId="thread-fake-001", turnId="turn-fake-001",
         )
         s = make_session(client)
         monotonic_values = iter([1000.0, 999.0, 999.0, 999.0, 1000.2])
@@ -919,17 +972,17 @@ class TestSessionRetirement:
                 "status": "completed", "aggregatedOutput": "hi",
                 "exitCode": 0, "commandActions": [],
             },
-            threadId="t", turnId="tu1",
+            threadId="thread-fake-001", turnId="turn-fake-001",
         )
         # Non-tool activity immediately after — resets watchdog.
         client.queue_notification(
             "item/completed",
             item={"type": "agentMessage", "id": "m1", "text": "tool finished"},
-            threadId="t", turnId="tu1",
+            threadId="thread-fake-001", turnId="turn-fake-001",
         )
         client.queue_notification(
-            "turn/completed", threadId="t",
-            turn={"id": "tu1", "status": "completed", "error": None},
+            "turn/completed", threadId="thread-fake-001",
+            turn={"id": "turn-fake-001", "status": "completed", "error": None},
         )
         s = make_session(client)
         r = s.run_turn(
@@ -955,7 +1008,7 @@ class TestSessionRetirement:
                 "type": "agentMessage", "id": "m1",
                 "text": "partial output... <turn_aborted>",
             },
-            threadId="t", turnId="tu1",
+            threadId="thread-fake-001", turnId="turn-fake-001",
         )
         # Deliberately NO turn/completed notification queued.
         s = make_session(client)
@@ -976,7 +1029,7 @@ class TestSessionRetirement:
             "item/completed",
             item={"type": "agentMessage", "id": "m1",
                   "text": "<turn_aborted/>"},
-            threadId="t", turnId="tu1",
+            threadId="thread-fake-001", turnId="turn-fake-001",
         )
         s = make_session(client)
         r = s.run_turn("x", turn_timeout=2.0,
@@ -1034,9 +1087,9 @@ class TestSessionRetirement:
         triggers the re-auth hint + retirement."""
         client = FakeClient()
         client.queue_notification(
-            "turn/completed", threadId="t",
+            "turn/completed", threadId="thread-fake-001",
             turn={
-                "id": "tu1", "status": "failed",
+                "id": "turn-fake-001", "status": "failed",
                 "error": {"message": "401 Unauthorized: please reauthenticate"},
             },
         )
@@ -1052,9 +1105,9 @@ class TestSessionRetirement:
         re-auth hint. Conservative classifier."""
         client = FakeClient()
         client.queue_notification(
-            "turn/completed", threadId="t",
+            "turn/completed", threadId="thread-fake-001",
             turn={
-                "id": "tu1", "status": "failed",
+                "id": "turn-fake-001", "status": "failed",
                 "error": {"message": "rate limit exceeded"},
             },
         )
@@ -1104,7 +1157,7 @@ class TestThreadStartCrossFill:
             {"thread": {"sessionId": "alias-1"},
              "activePermissionProfile": {"id": "x"}}
             if method == "thread/start" else
-            {"turn": {"id": "tu1"}} if method == "turn/start" else {}
+            {"turn": {"id": "turn-fake-001"}} if method == "turn/start" else {}
         )
         s = make_session(client)
         tid = s.ensure_started()
@@ -1114,7 +1167,7 @@ class TestThreadStartCrossFill:
         client = FakeClient()
         client._request_handler = lambda method, params: (
             {"sessionId": "top-1"} if method == "thread/start" else
-            {"turn": {"id": "tu1"}} if method == "turn/start" else {}
+            {"turn": {"id": "turn-fake-001"}} if method == "turn/start" else {}
         )
         s = make_session(client)
         tid = s.ensure_started()
@@ -1127,7 +1180,7 @@ class TestThreadStartCrossFill:
         client._request_handler = lambda method, params: (
             {"thread": {}, "activePermissionProfile": {"id": "x"}}
             if method == "thread/start" else
-            {"turn": {"id": "tu1"}}
+            {"turn": {"id": "turn-fake-001"}}
         )
         s = make_session(client)
         with pytest.raises(CodexAppServerError, match="no thread id"):

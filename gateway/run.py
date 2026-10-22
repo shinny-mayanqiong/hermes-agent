@@ -5842,6 +5842,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         await self.hooks.emit("gateway:startup", {
             "platforms": [p.value for p in self.adapters.keys()],
         })
+        from hermes_cli.plugins import invoke_hook_async
+        await invoke_hook_async("on_gateway_start", gateway=self)
         
         if connected_count > 0:
             logger.info("Gateway running with %s platform(s)", connected_count)
@@ -6619,6 +6621,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             self._running = False
             self._draining = True
+            from hermes_cli.plugins import invoke_hook_async
+            await invoke_hook_async("on_gateway_stop", gateway=self)
 
             # Notify all chats with active agents BEFORE draining.
             # Adapters are still connected here, so messages can be sent.
