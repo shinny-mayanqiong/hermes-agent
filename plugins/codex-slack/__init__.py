@@ -34,7 +34,7 @@ from .browser import SessionBrowser, ACTION_PAGE, ACTION_RESUME, ACTION_ARCHIVE,
 logger = logging.getLogger(__name__)
 
 COMMAND_NAME = "codex"
-COMMAND_PREFIX = "/codex"
+PROJECT_COMMAND_NAME = "odoo-hedge-codex"
 
 ACTION_OPEN = "codex_slack_open"
 ACTION_APPROVE_ONCE = "codex_slack_approve_once"
@@ -186,17 +186,17 @@ def _event_text(event: Any, *, bot_user_id: str = "") -> str:
 
 def _command_args(text: str) -> Optional[str]:
     stripped = str(text or "").strip()
-    lowered = stripped.lower()
-    if lowered == COMMAND_PREFIX or lowered == "!codex":
-        return ""
-    for prefix in (COMMAND_PREFIX + " ", "!codex "):
-        if lowered.startswith(prefix):
-            return stripped[len(prefix):].strip()
+    parts = stripped.split(None, 1)
+    if not parts:
+        return None
+    for name in (COMMAND_NAME, PROJECT_COMMAND_NAME):
+        if parts[0].lower() in {f"/{name}", f"!{name}"}:
+            return parts[1] if len(parts) == 2 else ("sessions" if name == PROJECT_COMMAND_NAME else "")
     return None
 
 
 def _event_command_args(event: Any, text: Optional[str] = None) -> Optional[str]:
-    """Accept native /codex and the already-installed /hermes fallback."""
+    """Accept native plugin commands and the already-installed /hermes fallback."""
     text = _event_text(event) if text is None else text
     direct = _command_args(text)
     if direct is not None:
@@ -204,13 +204,7 @@ def _event_command_args(event: Any, text: Optional[str] = None) -> Optional[str]
     raw = _raw_message(event)
     if str(raw.get("command") or "").strip().lower() != "/hermes":
         return None
-    stripped = text.strip()
-    lowered = stripped.lower()
-    if lowered == "codex":
-        return ""
-    if lowered.startswith("codex "):
-        return stripped[len("codex ") :].strip()
-    return None
+    return _command_args("/" + text.strip())
 
 
 def _slack_data(response: Any) -> dict[str, Any]:
@@ -575,6 +569,7 @@ class CodexSlackManager(ProgressMirror, SessionBrowser):
     @staticmethod
     def usage() -> str:
         return (
+            "`/odoo-hedge-codex` 打开项目会话卡片（也支持下列参数）\n"
             "`/codex sessions [archived]` 查看项目 session\n"
             "`/codex new [目录]` 创建 session\n"
             "`/codex resume <session-id> [新目录]` 恢复 session"
@@ -1330,6 +1325,13 @@ def register(ctx) -> None:
         _usage,
         description="Control local Codex sessions from Slack",
         args_hint="<sessions [archived]|new [dir]|resume id [dir]>",
+        platforms=("slack",),
+    )
+    ctx.register_command(
+        PROJECT_COMMAND_NAME,
+        _usage,
+        description="Odoo Hedge：查看、创建或继续 Codex 会话",
+        args_hint="[sessions [archived] | new [dir] | resume id [dir]]",
         platforms=("slack",),
     )
     ctx.register_hook("pre_gateway_dispatch", _pre_gateway_dispatch)

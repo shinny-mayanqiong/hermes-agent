@@ -349,6 +349,32 @@ async def test_existing_hermes_slash_routes_to_codex_without_native_manifest(plu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["/odoo-hedge-codex", "!odoo-hedge-codex", "hermes"])
+async def test_project_entry_opens_cards_without_arguments(plugin, tmp_path, entry):
+    manager = _manager(plugin, tmp_path, threads=[_summary(cwd=tmp_path / "project")])
+    event = _event(entry)
+    if entry == "hermes":
+        event.text = "odoo-hedge-codex"
+        event.raw_message = {"command": "/hermes", "text": "odoo-hedge-codex", "team_id": "T1"}
+    assert manager.pre_dispatch(event, manager.gateway)["action"] == "skip"
+    await asyncio.gather(*manager._handlers)
+    message = manager.gateway.adapter.client.ephemeral[-1]
+    assert "最近的 Codex sessions" in message["text"]
+    assert any(block.get("expand") for block in message["blocks"])
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("/odoo-hedge-codex new", "new"),
+    ("/odoo-hedge-codex sessions archived", "sessions archived"),
+    ("/odoo-hedge-codex resume thread-123 /tmp/project", "resume thread-123 /tmp/project"),
+    ("/odoo-hedge-codex help", "help"),
+    ("/odoo-hedge-codex-extra", None),
+])
+def test_project_command_reuses_subcommands_with_exact_name_matching(plugin, text, expected):
+    assert plugin._command_args(text) == expected
+
+
+@pytest.mark.asyncio
 async def test_new_creates_codex_then_root_and_persists_binding(plugin, tmp_path):
     FakeSession.instances.clear()
     manager = _manager(plugin, tmp_path)
@@ -571,7 +597,9 @@ def test_register_exposes_command_hook_and_namespaced_actions(plugin):
 
     plugin.register(ctx)
 
-    assert ctx.commands[0][0][0] == "codex"
+    registered = {args[0]: metadata for args, metadata in ctx.commands}
+    assert registered["odoo-hedge-codex"]["platforms"] == ("slack",)
+    assert "codex" in registered
     assert dict(ctx.hooks)["pre_gateway_dispatch"] == plugin._pre_gateway_dispatch
     assert dict(ctx.hooks)["on_gateway_start"] == plugin._on_gateway_start
     assert dict(ctx.hooks)["on_gateway_stop"] == plugin._on_gateway_stop

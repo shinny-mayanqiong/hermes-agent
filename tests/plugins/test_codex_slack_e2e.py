@@ -126,6 +126,10 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
         module = plugins.get_plugin_manager()._plugins["codex-slack"].module
         assert module is not None
         manager = module._manager()
+        from hermes_cli.commands import slack_app_manifest, slack_subcommand_map
+        commands = slack_app_manifest()["features"]["slash_commands"]
+        assert any(entry["command"] == "/odoo-hedge-codex" for entry in commands)
+        assert slack_subcommand_map()["odoo-hedge-codex"] == "/odoo-hedge-codex"
         api = SlackAPI()
         adapter = SlackAdapter(PlatformConfig(enabled=True, extra={"free_response_channels": ["C_HOME"]}))
         adapter._bot_user_id = "U_BOT"
@@ -137,10 +141,15 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
         # Keep both real inbound adapter normalization and gateway plugin dispatch;
         # skip only BasePlatformAdapter's unrelated Hermes-agent scheduling.
         adapter.handle_message = gateway._handle_message
+        async def project_slash(text=""):
+            await adapter._handle_slash_command({
+                "command": "/odoo-hedge-codex", "text": text, "channel_id": "C_HOME",
+                "user_id": "U_ME", "team_id": "T1",
+            })
+            await asyncio.gather(*manager._handlers)
         try:
             await plugins.invoke_hook_async("on_gateway_start", gateway=gateway)
-            await gateway._handle_message(_event("/codex new"))
-            await asyncio.gather(*manager._handlers)
+            await project_slash("new")
             binding = manager.store.by_codex("thread-1")
             assert binding is not None, api.ephemeral
             assert binding.cwd == str(repo)
@@ -204,13 +213,11 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
                 await callback(ack, {"channel": {"id": "C_HOME"}, "user": {"id": "U_ME"}, "team": {"id": "T1"}}, action)
                 assert acknowledged == [True]
 
-            await gateway._handle_message(_event("/codex sessions"))
-            await asyncio.gather(*manager._handlers)
+            await project_slash()
             await click("Archive")
             assert daemon.threads["thread-1"]["archived"]
             assert manager.store.by_codex("thread-1").state == "archived"
-            await gateway._handle_message(_event("/codex sessions archived"))
-            await asyncio.gather(*manager._handlers)
+            await project_slash("sessions archived")
             await click("Resume")
             assert not daemon.threads["thread-1"]["archived"]
             assert manager.store.by_codex("thread-1").thread_ts == binding.thread_ts

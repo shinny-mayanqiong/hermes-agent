@@ -62,12 +62,23 @@ slow daemon can take longer. Only sessions explicitly bound with `new` or
 bound; `!status` shows the most recent progress.
 
 Regenerate and apply the Slack app manifest after enabling the plugin so Slack
-knows about the native `/codex` command. Until then, every command below also
+knows about the native `/codex` and `/odoo-hedge-codex` commands. Until then, every command below also
 works through the existing `/hermes` entry point, for example
-`/hermes codex sessions`.
+`/hermes codex sessions` or `/hermes odoo-hedge-codex`.
+
+To show `/odoo-hedge-codex` in Slack's `/` menu, add it to the installed app's
+**Slash Commands** (or merge its generated `features.slash_commands` entry
+into the existing App Manifest). Set its description to
+“Odoo Hedge：查看、创建或继续 Codex 会话” and its usage hint to
+`[sessions [archived] | new [dir] | resume id [dir]]`.
+Save and reinstall if Slack prompts. Socket Mode delivers the command to the
+existing gateway; no new public endpoint is needed. Use the channel composer,
+since Slack does not support custom slash commands inside message threads.
 
 ## Commands
 
+- `/odoo-hedge-codex` — open the project session cards directly. It also accepts
+  every `/codex` subcommand below, including `new`, `resume`, and `sessions archived`.
 - `/codex sessions` — list unarchived project sessions, 20 per page.
 - `/codex sessions archived` — list archived project sessions. The list also
   has a button to switch between archived and unarchived views.
