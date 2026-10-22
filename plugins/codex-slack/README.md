@@ -14,7 +14,8 @@ plugins:
   codex-slack:
     default_cwd: /home/user/Repos/odoo-hedge
     allowed_roots:
-      - /home/user/Repos
+      - /home/user/Repos/odoo-hedge
+      - /home/user/Repos/odoo-hedge-worktrees
     page_size: 20
     queue_limit: 5
     max_live_sessions: 5
@@ -67,11 +68,12 @@ works through the existing `/hermes` entry point, for example
 
 ## Commands
 
-- `/codex sessions` — list local interactive Codex sessions, 20 per page.
+- `/codex sessions` — list unarchived project sessions, 20 per page.
+- `/codex sessions archived` — list archived project sessions. The list also
+  has a button to switch between archived and unarchived views.
 - `/codex new [directory]` — create a session; the configured default is used
   when no directory is given. Relative paths are resolved from the first
-  `allowed_roots` entry, so `team/project/worktree` means
-  `/home/user/Repos/team/project/worktree` with the example configuration.
+  `allowed_roots` entry. Use an absolute path for a worktree under another root.
 - `/codex resume <session-id> [new-directory]` — bind an existing Codex session
   to a new Slack thread. Supply a new directory when the session's original
   worktree no longer exists.
@@ -105,3 +107,36 @@ plugin keeps the creating connection alive until that prompt arrives.
 
 Only text input is supported in v1. Codex's own permission configuration stays
 authoritative; approval requests appear as Slack buttons in the bound thread.
+
+## Session cards
+
+The ephemeral list shows 20 compact cards per page. Each card contains the ID
+(last four characters) and title, followed by creation time, update time, and
+the full path on separate lines. Text wraps in a single column; Resume / Archive /
+Delete sit in a separate action row below the card. There is no status column
+or horizontal table scrolling. Times include seconds and use the gateway host's
+local timezone, shown above the list. Only long titles are abbreviated; paths
+and timestamps are preserved in full. Exceptionally long paths use additional
+text sections, splitting a logical page across messages if needed to stay within
+Slack's block limits while keeping each card with its buttons.
+Buttons retain the full ID internally, so matching four-character suffixes do
+not select the wrong session.
+
+The list filters to `allowed_roots` and their descendants before filling each
+page. It excludes sibling prefixes and symlinks pointing outside the roots.
+Removed worktrees remain listed so their sessions can be archived, deleted, or
+resumed with a replacement directory. The same scope applies to new sessions,
+resuming by ID, and continued work in existing bindings.
+
+Resume opens the original Slack thread if one already exists. In the archived
+view it first restores the Codex session. Archive pauses mirroring and preserves
+the binding and delivery checkpoints. Delete permanently removes Codex history;
+the original Slack messages and project files remain. Both actions use Slack
+confirmation dialogs explaining that Codex also processes spawned descendants.
+Active sessions must be stopped before archiving or deleting. Failed operations
+preserve the binding state; successful mutations invalidate old row buttons and
+refresh the list. The archived view offers Resume and Delete.
+
+Protocol references: [Codex App Server](https://learn.chatgpt.com/docs/app-server)
+and [Slack sections](https://docs.slack.dev/reference/block-kit/blocks/section-block/)
+with [action rows](https://docs.slack.dev/reference/block-kit/blocks/actions-block/).

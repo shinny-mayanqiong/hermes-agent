@@ -7,20 +7,19 @@ from functools import partial
 import json
 import logging
 import os
+import re
 import secrets
 import shlex
 import threading
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from agent.transports.codex_app_server_session import (
     CodexAppServerSession,
     CodexThreadCatalog,
-    CodexThreadPage,
     CodexThreadSummary,
 )
 from agent.transports.codex_app_server import CodexAppServerClient
@@ -30,14 +29,13 @@ from hermes_cli.config import load_config
 
 from .store import Binding, BindingConflict, BindingStore  # type: ignore[unresolved-import]
 from .progress import ProgressMirror, activity_text, turn_progress
+from .browser import SessionBrowser, ACTION_PAGE, ACTION_RESUME, ACTION_ARCHIVE, ACTION_DELETE
 
 logger = logging.getLogger(__name__)
 
 COMMAND_NAME = "codex"
 COMMAND_PREFIX = "/codex"
 
-ACTION_PAGE = "codex_slack_page"
-ACTION_RESUME = "codex_slack_resume"
 ACTION_OPEN = "codex_slack_open"
 ACTION_APPROVE_ONCE = "codex_slack_approve_once"
 ACTION_APPROVE_SESSION = "codex_slack_approve_session"
@@ -47,7 +45,9 @@ ACTION_DENY = "codex_slack_deny"
 @dataclass(frozen=True)
 class PluginConfig:
     default_cwd: str = "/home/user/Repos/odoo-hedge"
-    allowed_roots: tuple[str, ...] = ("/home/user/Repos",)
+    allowed_roots: tuple[str, ...] = (
+        "/home/user/Repos/odoo-hedge", "/home/user/Repos/odoo-hedge-worktrees",
+    )
     page_size: int = 20
     queue_limit: int = 5
     max_live_sessions: int = 5
@@ -232,7 +232,7 @@ def _friendly_codex_error(exc: Exception) -> str:
     return f"Codex 操作失败：{message}"
 
 
-class CodexSlackManager(ProgressMirror):
+class CodexSlackManager(ProgressMirror, SessionBrowser):
     def __init__(
         self,
         *,
@@ -266,6 +266,7 @@ class CodexSlackManager(ProgressMirror):
         self._handlers: set[asyncio.Task] = set()
         self._shutting_down = False
         self._mirror_locks: dict[str, asyncio.Lock] = {}
+        self._managing_sessions: set[str] = set()
 
     # ---------- gateway + Slack helpers ----------
 
@@ -436,15 +437,19 @@ class CodexSlackManager(ProgressMirror):
         return str(resolved)
 
     def _cwd_allowed(self, cwd: str) -> bool:
+        if not cwd or not Path(cwd).is_absolute():
+            return False
         try:
-            resolved = Path(os.path.expanduser(str(cwd))).resolve(strict=True)
-        except (FileNotFoundError, OSError):
+            # Deleted worktrees must remain discoverable for archive/delete or
+            # resuming in a replacement directory. Execution checks existence.
+            resolved = Path(cwd).resolve()
+        except (OSError, RuntimeError, ValueError):
             return False
         for root in self.config.allowed_roots:
             try:
-                resolved.relative_to(Path(root).resolve(strict=True))
+                resolved.relative_to(Path(root).resolve())
                 return True
-            except (ValueError, FileNotFoundError, OSError):
+            except (ValueError, OSError, RuntimeError):
                 continue
         return False
 
@@ -570,7 +575,7 @@ class CodexSlackManager(ProgressMirror):
     @staticmethod
     def usage() -> str:
         return (
-            "`/codex sessions` 查看本机 session\n"
+            "`/codex sessions [archived]` 查看项目 session\n"
             "`/codex new [目录]` 创建 session\n"
             "`/codex resume <session-id> [新目录]` 恢复 session"
         )
@@ -610,7 +615,10 @@ class CodexSlackManager(ProgressMirror):
             return
         command = argv[0].lower()
         if command == "sessions":
-            await self.show_sessions(channel_id, user_id)
+            if len(argv) > 2 or (len(argv) == 2 and argv[1].lower() != "archived"):
+                await self._post_ephemeral(channel_id, user_id, self.usage())
+                return
+            await self.show_sessions(channel_id, user_id, archived=len(argv) == 2)
             return
         if command == "new":
             raw_cwd = " ".join(argv[1:])
@@ -652,6 +660,21 @@ class CodexSlackManager(ProgressMirror):
         await self._post_ephemeral(channel_id, user_id, self.usage())
 
     async def resume_by_id(
+        self, thread_id: str, *, team_id: str, channel_id: str, user_id: str,
+        cwd_override: Optional[str] = None, restore_archived: bool = False,
+    ) -> None:
+        if thread_id in self._managing_sessions:
+            await self._post_ephemeral(channel_id, user_id, "该会话正在处理操作，请稍后重试。")
+            return
+        self._managing_sessions.add(thread_id)
+        try:
+            await self._resume_by_id(thread_id, team_id=team_id, channel_id=channel_id,
+                                     user_id=user_id, cwd_override=cwd_override,
+                                     restore_archived=restore_archived)
+        finally:
+            self._managing_sessions.discard(thread_id)
+
+    async def _resume_by_id(
         self,
         thread_id: str,
         *,
@@ -659,6 +682,7 @@ class CodexSlackManager(ProgressMirror):
         channel_id: str,
         user_id: str,
         cwd_override: Optional[str] = None,
+        restore_archived: bool = False,
     ) -> None:
         try:
             summary = await asyncio.to_thread(self.catalog.read_thread, thread_id)
@@ -667,6 +691,8 @@ class CodexSlackManager(ProgressMirror):
             return
         requested_cwd = cwd_override if cwd_override is not None else summary.cwd
         try:
+            if not self._cwd_allowed(summary.cwd):
+                raise ValueError("该会话不在允许的项目路径范围内。")
             cwd = self.resolve_cwd(requested_cwd)
         except ValueError as exc:
             await self._post_ephemeral(
@@ -677,6 +703,11 @@ class CodexSlackManager(ProgressMirror):
             return
         summary = replace(summary, cwd=cwd)
         try:
+            binding = self.store.by_codex(thread_id)
+            if restore_archived or (binding and binding.state == "archived"):
+                await asyncio.to_thread(self.catalog.unarchive_thread, thread_id)
+                if binding:
+                    self.store.set_state(binding, "active")
             await self._bind_thread(
                 summary=summary,
                 team_id=team_id,
@@ -716,112 +747,6 @@ class CodexSlackManager(ProgressMirror):
         if state.channel_id != channel_id:
             return None
         return state
-
-    async def show_sessions(
-        self,
-        channel_id: str,
-        user_id: str,
-        *,
-        cursor: Optional[str] = None,
-        history: Optional[list[Optional[str]]] = None,
-    ) -> None:
-        history = list(history or [])
-        try:
-            page: CodexThreadPage = await asyncio.to_thread(
-                self.catalog.list_threads,
-                cursor=cursor,
-                limit=self.config.page_size,
-            )
-        except Exception as exc:
-            await self._post_ephemeral(channel_id, user_id, f"无法列出 Codex sessions：{exc}")
-            return
-        bound = self.store.by_codex_many(item.thread_id for item in page.threads)
-        blocks: list[dict[str, Any]] = [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*最近的 Codex sessions*（每页 {self.config.page_size} 个）"},
-            }
-        ]
-        if not page.threads:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "没有找到 session。"}})
-        for item in page.threads:
-            timestamp = datetime.fromtimestamp(item.recency_at or item.updated_at).strftime("%Y-%m-%d %H:%M")
-            title = item.title.replace("\n", " ")[:90]
-            text = f"*{title}*\n`{item.thread_id}` · {timestamp}\n`{item.cwd}`"
-            block: dict[str, Any] = {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": text},
-            }
-            binding = bound.get(item.thread_id)
-            if binding:
-                token = self._action_token(
-                    "open",
-                    channel_id=channel_id,
-                    payload={"codex_thread_id": item.thread_id},
-                )
-                block["accessory"] = {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Open thread"},
-                    "action_id": ACTION_OPEN,
-                    "value": token,
-                }
-            else:
-                try:
-                    self.resolve_cwd(item.cwd)
-                except ValueError as exc:
-                    block["text"]["text"] += (
-                        f"\n_{exc}；可用 `/codex resume {item.thread_id} <新目录>` 恢复_"
-                    )
-                    blocks.append(block)
-                    continue
-                token = self._action_token(
-                    "resume",
-                    channel_id=channel_id,
-                    payload={"codex_thread_id": item.thread_id},
-                )
-                block["accessory"] = {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Resume"},
-                    "action_id": ACTION_RESUME,
-                    "value": token,
-                }
-            blocks.append(block)
-
-        navigation: list[dict[str, Any]] = []
-        if history:
-            previous_cursor = history[-1]
-            token = self._action_token(
-                "page",
-                channel_id=channel_id,
-                payload={"cursor": previous_cursor, "history": history[:-1]},
-            )
-            navigation.append({
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Previous"},
-                "action_id": ACTION_PAGE,
-                "value": token,
-            })
-        if page.next_cursor:
-            token = self._action_token(
-                "page",
-                channel_id=channel_id,
-                payload={"cursor": page.next_cursor, "history": [*history, cursor]},
-            )
-            navigation.append({
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Next"},
-                "action_id": ACTION_PAGE,
-                "value": token,
-            })
-        if navigation:
-            blocks.append({"type": "actions", "elements": navigation})
-        await self._post_ephemeral(
-            channel_id,
-            user_id,
-            f"最近的 Codex sessions（每页 {self.config.page_size} 个）",
-            blocks=blocks,
-        )
-        self._discard_slash_context(channel_id)
 
     # ---------- bound-thread runtime ----------
 
@@ -879,6 +804,13 @@ class CodexSlackManager(ProgressMirror):
         return runtime
 
     async def enqueue_turn(self, binding: Binding, text: str, user_id: str) -> None:
+        current = self.store.by_codex(binding.codex_thread_id)
+        if (not current or current.state != "active"
+                or binding.codex_thread_id in self._managing_sessions
+                or not self._cwd_allowed(current.cwd)):
+            await self._post_ephemeral(binding.channel_id, user_id,
+                                       "该会话当前不可运行，请重新打开 `/codex sessions`。")
+            return
         self._ensure_reaper()
         runtime = self._runtime(binding)
         if runtime.stopping or self._shutting_down:
@@ -1232,7 +1164,8 @@ class CodexSlackManager(ProgressMirror):
                 await self._post_ephemeral(channel_id, user_id, "该操作只能在 Codex home channel 执行。")
             return
         state = self._take_action(str(action.get("value") or ""), channel_id=channel_id)
-        if state is None or state.kind not in {"page", "resume", "open"}:
+        if (state is None or state.kind not in {"page", "resume", "open", "archive", "delete"}
+                or action_id.split(":", 1)[0] != f"codex_slack_{state.kind}"):
             await self._post_ephemeral(channel_id, user_id, "该操作已过期，请重新执行 `/codex sessions`。")
             return
         if state.kind == "page":
@@ -1241,6 +1174,7 @@ class CodexSlackManager(ProgressMirror):
                 user_id,
                 cursor=state.payload.get("cursor"),
                 history=state.payload.get("history") or [],
+                archived=bool(state.payload.get("archived")),
             )
         elif state.kind == "resume":
             await self.resume_by_id(
@@ -1248,6 +1182,13 @@ class CodexSlackManager(ProgressMirror):
                 team_id=team_id,
                 channel_id=channel_id,
                 user_id=user_id,
+                restore_archived=bool(state.payload.get("archived")),
+            )
+        elif state.kind in {"archive", "delete"}:
+            await self.manage_session(
+                state.kind, str(state.payload["codex_thread_id"]),
+                channel_id=channel_id, user_id=user_id,
+                archived=bool(state.payload.get("archived")),
             )
         else:
             binding = self.store.by_codex(str(state.payload["codex_thread_id"]))
@@ -1272,6 +1213,14 @@ class CodexSlackManager(ProgressMirror):
             return
         binding = self.store.by_slack(self._event_team_id(event), channel_id, thread_ts)
         if binding is None:
+            return
+        if binding.state != "active":
+            text = ("该会话已归档；请在 `/codex sessions archived` 中点击 Resume 恢复。"
+                    if binding.state == "archived" else "该 Codex 会话已永久删除，原 Slack 消息仍保留。")
+            await self._post_ephemeral(channel_id, user_id, text, thread_ts=thread_ts)
+            return
+        if not self._cwd_allowed(binding.cwd):
+            await self._post_ephemeral(channel_id, user_id, "该会话不在允许的项目路径范围内。", thread_ts=thread_ts)
             return
         lowered = text.lower()
         if lowered == "!status":
@@ -1380,7 +1329,7 @@ def register(ctx) -> None:
         COMMAND_NAME,
         _usage,
         description="Control local Codex sessions from Slack",
-        args_hint="<sessions|new [dir]|resume id [dir]>",
+        args_hint="<sessions [archived]|new [dir]|resume id [dir]>",
         platforms=("slack",),
     )
     ctx.register_hook("pre_gateway_dispatch", _pre_gateway_dispatch)
@@ -1389,9 +1338,14 @@ def register(ctx) -> None:
     for action_id in (
         ACTION_PAGE,
         ACTION_RESUME,
+        ACTION_ARCHIVE,
+        ACTION_DELETE,
         ACTION_OPEN,
         ACTION_APPROVE_ONCE,
         ACTION_APPROVE_SESSION,
         ACTION_DENY,
     ):
-        ctx.register_slack_action_handler(action_id, _action_handler(action_id))
+        pattern = (re.compile(rf"^{action_id}(?::[A-Za-z0-9_-]+)?$")
+                   if action_id in {ACTION_PAGE, ACTION_RESUME, ACTION_ARCHIVE, ACTION_DELETE}
+                   else action_id)
+        ctx.register_slack_action_handler(pattern, _action_handler(action_id))

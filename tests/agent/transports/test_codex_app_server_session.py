@@ -344,6 +344,26 @@ class TestThreadCatalog:
         assert summary.title == "Named session"
         assert summary.source_kind == "custom"
 
+    @pytest.mark.parametrize("operation,method", [
+        ("archive_thread", "thread/archive"),
+        ("unarchive_thread", "thread/unarchive"),
+        ("delete_thread", "thread/delete"),
+    ])
+    def test_lifecycle_rpc_closes_client(self, operation, method):
+        client = FakeClient()
+        catalog = CodexThreadCatalog(client_factory=lambda **_: client)
+        getattr(catalog, operation)("thread-1")
+        assert client.requests == [(method, {"threadId": "thread-1"})]
+        assert client._closed
+
+    def test_archived_listing_is_explicit(self):
+        client = FakeClient()
+        catalog = CodexThreadCatalog(client_factory=lambda **_: client)
+        catalog.list_threads(archived=True, cursor="archived-page")
+        method, params = client.requests[0]
+        assert method == "thread/list" and params["archived"] is True
+        assert params["cursor"] == "archived-page"
+
 
 # ---- turn loop ----
 

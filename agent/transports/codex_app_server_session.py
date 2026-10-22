@@ -178,10 +178,11 @@ class CodexThreadCatalog:
         *,
         cursor: Optional[str] = None,
         limit: int = 20,
+        archived: bool = False,
         timeout: float = 30.0,
     ) -> CodexThreadPage:
         params: dict[str, Any] = {
-            "archived": False,
+            "archived": archived,
             "limit": max(1, int(limit)),
             "sortKey": "recency_at",
             "sortDirection": "desc",
@@ -195,6 +196,15 @@ class CodexThreadCatalog:
             next_cursor=result.get("nextCursor"),
             backwards_cursor=result.get("backwardsCursor"),
         )
+
+    def archive_thread(self, thread_id: str) -> None:
+        self._request("thread/archive", {"threadId": str(thread_id)}, 30.0)
+
+    def unarchive_thread(self, thread_id: str) -> None:
+        self._request("thread/unarchive", {"threadId": str(thread_id)}, 30.0)
+
+    def delete_thread(self, thread_id: str) -> None:
+        self._request("thread/delete", {"threadId": str(thread_id)}, 30.0)
 
     def read_thread(
         self,

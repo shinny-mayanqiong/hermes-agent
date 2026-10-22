@@ -135,6 +135,8 @@ class FakeCatalog:
         self.list_calls = []
         self.activity = {"status": {"type": "idle"}, "turns": []}
         self.interrupts = []
+        self.archived_ids = set()
+        self.mutations = []
 
     def read_activity(self, thread_id, *, after_turn_id=""):
         del thread_id, after_turn_id
@@ -146,7 +148,23 @@ class FakeCatalog:
 
     def list_threads(self, **kwargs):
         self.list_calls.append(kwargs)
-        return CodexThreadPage(self.threads, next_cursor="next-page")
+        threads = [thread for thread in self.threads
+                   if (thread.thread_id in self.archived_ids) == kwargs.get("archived", False)]
+        start = int(kwargs.get("cursor") or 0)
+        end = start + kwargs.get("limit", 20)
+        return CodexThreadPage(threads[start:end], next_cursor=str(end) if end < len(threads) else None)
+
+    def archive_thread(self, thread_id):
+        self.mutations.append(("archive", thread_id))
+        self.archived_ids.add(thread_id)
+
+    def unarchive_thread(self, thread_id):
+        self.mutations.append(("unarchive", thread_id))
+        self.archived_ids.discard(thread_id)
+
+    def delete_thread(self, thread_id):
+        self.mutations.append(("delete", thread_id))
+        self.threads = [thread for thread in self.threads if thread.thread_id != thread_id]
 
     def read_thread(self, thread_id):
         for thread in self.threads:
@@ -385,19 +403,24 @@ async def test_resume_can_replace_a_missing_original_cwd(plugin, tmp_path):
 
 @pytest.mark.asyncio
 async def test_sessions_page_is_ephemeral_has_twenty_limit_and_buttons(plugin, tmp_path):
-    threads = [_summary(f"codex-{idx}", tmp_path / "project", f"Session {idx}") for idx in range(20)]
+    threads = [_summary(f"codex-{idx:04}", tmp_path / "project", f"Session {idx}") for idx in range(21)]
     manager = _manager(plugin, tmp_path, threads=threads)
-    _binding(plugin, manager, codex_id="codex-0")
+    _binding(plugin, manager, codex_id="codex-0000")
 
     await manager.show_sessions("C_HOME", "U_ME")
 
-    assert manager.catalog.list_calls == [{"cursor": None, "limit": 20}]
+    assert manager.catalog.list_calls[0] == {"cursor": None, "limit": 20, "archived": False}
     blocks = manager.gateway.adapter.client.ephemeral[-1]["blocks"]
-    assert len([block for block in blocks if block["type"] == "section"]) == 21
-    action_ids = {block.get("accessory", {}).get("action_id") for block in blocks}
-    assert plugin.ACTION_OPEN in action_ids
-    assert plugin.ACTION_RESUME in action_ids
-    assert blocks[-1]["elements"][-1]["text"]["text"] == "Next"
+    cards = [block for block in blocks if block["type"] == "section" and block.get("expand")]
+    assert len(cards) == 20
+    assert cards[0]["text"]["text"].startswith("0000 · Session 0\n")
+    assert "创建：1970-01-01 00:00:10" in cards[0]["text"]["text"]
+    assert "更新：1970-01-01 00:00:20" in cards[0]["text"]["text"]  # updatedAt, not recencyAt
+    actions = [action for block in blocks[:-1] if block["type"] == "actions" for action in block["elements"]]
+    assert len({action["action_id"] for action in actions}) == len(actions)
+    assert [action["text"]["text"] for action in actions[:3]] == ["Resume", "Archive", "Delete"]
+    assert "不可恢复" in actions[2]["confirm"]["text"]["text"]
+    assert any(button["text"]["text"] == "Next" for button in blocks[-1]["elements"])
 
 
 @pytest.mark.asyncio
@@ -408,10 +431,11 @@ async def test_sessions_page_distinguishes_a_deleted_cwd_from_disallowed(plugin,
     await manager.show_sessions("C_HOME", "U_ME")
 
     blocks = manager.gateway.adapter.client.ephemeral[-1]["blocks"]
-    session_text = blocks[1]["text"]["text"]
-    assert "目录不存在" in session_text
-    assert "/codex resume codex-1 <新目录>" in session_text
-    assert "accessory" not in blocks[1]
+    card = next(block for block in blocks if block["type"] == "section" and block.get("expand"))
+    assert str(missing) in card["text"]["text"]
+    resume = next(block for block in blocks if block["type"] == "actions")["elements"][0]
+    await manager.handle_action(resume["action_id"], {"channel": {"id": "C_HOME"}, "user": {"id": "U_ME"}}, resume)
+    assert "目录不存在" in manager.gateway.adapter.client.ephemeral[-1]["text"]
 
 
 @pytest.mark.asyncio
@@ -551,14 +575,22 @@ def test_register_exposes_command_hook_and_namespaced_actions(plugin):
     assert dict(ctx.hooks)["pre_gateway_dispatch"] == plugin._pre_gateway_dispatch
     assert dict(ctx.hooks)["on_gateway_start"] == plugin._on_gateway_start
     assert dict(ctx.hooks)["on_gateway_stop"] == plugin._on_gateway_stop
-    assert {item[0] for item in ctx.actions} == {
+    for action_id in (
         plugin.ACTION_PAGE,
         plugin.ACTION_RESUME,
         plugin.ACTION_OPEN,
+        plugin.ACTION_ARCHIVE,
+        plugin.ACTION_DELETE,
         plugin.ACTION_APPROVE_ONCE,
         plugin.ACTION_APPROVE_SESSION,
         plugin.ACTION_DENY,
-    }
+    ):
+        matches = [callback for pattern, callback in ctx.actions
+                   if (pattern.fullmatch(action_id) if hasattr(pattern, "fullmatch") else pattern == action_id)]
+        assert len(matches) == 1
+    for action_id in (plugin.ACTION_PAGE, plugin.ACTION_RESUME, plugin.ACTION_ARCHIVE, plugin.ACTION_DELETE):
+        assert sum(bool(pattern.fullmatch(action_id + ":row-token")) for pattern, _ in ctx.actions
+                   if hasattr(pattern, "fullmatch")) == 1
 
 
 def test_active_writer_error_is_user_friendly(plugin):

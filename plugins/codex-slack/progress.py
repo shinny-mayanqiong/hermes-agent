@@ -100,6 +100,9 @@ class ProgressMirror:
             await self._sync_binding_locked(binding, initialize=initialize)
 
     async def _sync_binding_locked(self, binding, *, initialize: bool = False) -> None:
+        current = self.store.by_codex(binding.codex_thread_id)
+        if not current or current.state != "active" or not self._cwd_allowed(current.cwd):
+            return
         runtime = self._runtimes.get(binding.codex_thread_id)
         if runtime and runtime.active:
             return  # The Slack worker owns delivery until it saves its checkpoint.

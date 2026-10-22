@@ -44,7 +44,15 @@ class Daemon:
             elif method in {"thread/read", "thread/resume"}:
                 result = {"thread": self.threads[params["threadId"]]}
             elif method == "thread/list":
-                result = {"data": list(self.threads.values())}
+                threads = [thread for thread in self.threads.values()
+                           if thread.get("archived", False) == params.get("archived", False)]
+                offset = int(params.get("cursor", 0))
+                end = offset + params["limit"]
+                result = {"data": threads[offset:end], "nextCursor": str(end) if end < len(threads) else None}
+            elif method in {"thread/archive", "thread/unarchive"}:
+                self.threads[params["threadId"]]["archived"] = method == "thread/archive"
+            elif method == "thread/delete":
+                self.threads.pop(params["threadId"])
             elif method == "thread/turns/list":
                 turns = list(reversed(self.threads[params["threadId"]]["turns"]))
                 offset = int(params.get("cursor", 0))
@@ -181,6 +189,35 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
             })
             await asyncio.gather(*manager._handlers)
             assert "状态：" in api.messages[-1]["text"]
+            assert daemon.prompts == ["do the work"]
+
+            # Real discovered button handlers -> real RPC -> real binding store.
+            async def click(label):
+                action = next(element for block in api.ephemeral[-1]["blocks"] if block["type"] == "actions"
+                              for element in block["elements"] if element["text"]["text"] == label)
+                handlers = plugins.get_plugin_manager().get_slack_action_handlers()
+                callback = next(callback for pattern, callback, name in handlers
+                                if name == "codex-slack" and hasattr(pattern, "match") and pattern.match(action["action_id"]))
+                acknowledged = []
+                async def ack():
+                    acknowledged.append(True)
+                await callback(ack, {"channel": {"id": "C_HOME"}, "user": {"id": "U_ME"}, "team": {"id": "T1"}}, action)
+                assert acknowledged == [True]
+
+            await gateway._handle_message(_event("/codex sessions"))
+            await asyncio.gather(*manager._handlers)
+            await click("Archive")
+            assert daemon.threads["thread-1"]["archived"]
+            assert manager.store.by_codex("thread-1").state == "archived"
+            await gateway._handle_message(_event("/codex sessions archived"))
+            await asyncio.gather(*manager._handlers)
+            await click("Resume")
+            assert not daemon.threads["thread-1"]["archived"]
+            assert manager.store.by_codex("thread-1").thread_ts == binding.thread_ts
+            await manager.show_sessions("C_HOME", "U_ME")
+            await click("Delete")
+            assert "thread-1" not in daemon.threads
+            assert manager.store.by_codex("thread-1").state == "deleted"
             assert daemon.prompts == ["do the work"]
         finally:
             await plugins.invoke_hook_async("on_gateway_stop", gateway=gateway)

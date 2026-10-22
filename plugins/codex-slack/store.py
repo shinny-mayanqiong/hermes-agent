@@ -21,6 +21,7 @@ class Binding:
     cwd: str
     created_at: float
     last_used_at: float
+    state: str = "active"
 
 
 class BindingConflict(RuntimeError):
@@ -71,6 +72,8 @@ class BindingStore:
             );
             """
         )
+        if "state" not in {row["name"] for row in conn.execute("PRAGMA table_info(bindings)")}:
+            conn.execute("ALTER TABLE bindings ADD COLUMN state TEXT NOT NULL DEFAULT 'active'")
         return conn
 
     @contextmanager
@@ -98,6 +101,7 @@ class BindingStore:
             cwd=str(row["cwd"]),
             created_at=float(row["created_at"]),
             last_used_at=float(row["last_used_at"]),
+            state=str(row["state"]),
         )
 
     def create(self, binding: Binding) -> None:
@@ -173,10 +177,19 @@ class BindingStore:
     def in_channel(self, channel_id: str) -> list[Binding]:
         with self._lock, self._connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM bindings WHERE channel_id=? ORDER BY last_used_at DESC",
+                "SELECT * FROM bindings WHERE channel_id=? AND state='active' ORDER BY last_used_at DESC",
                 (channel_id,),
             ).fetchall()
         return [self._binding(row) for row in rows]
+
+    def set_state(self, binding: Binding, state: str) -> None:
+        if state not in {"active", "archived", "deleted"}:
+            raise ValueError(f"Invalid binding state: {state}")
+        with self._lock, self._connection() as conn:
+            conn.execute("UPDATE bindings SET state=? WHERE codex_thread_id=?",
+                         (state, binding.codex_thread_id))
+            if state == "deleted":
+                conn.execute("DELETE FROM progress WHERE codex_thread_id=?", (binding.codex_thread_id,))
 
     def progress(self, thread_id: str, turn_id: str = "") -> Optional[dict]:
         with self._lock, self._connection() as conn:
