@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from html import escape, unescape
 
 from .progress import activity_text, turn_progress
 
@@ -10,6 +11,21 @@ from .progress import activity_text, turn_progress
 class SessionControls:
     def _control_lock(self, binding):
         return self._control_locks.setdefault(binding.codex_thread_id, asyncio.Lock())
+
+    async def title(self, binding, argument: str = "") -> None:
+        name = unescape(argument).strip()
+        try:
+            summary = await asyncio.to_thread(self.catalog.read_thread, binding.codex_thread_id)
+            if not self._cwd_allowed(summary.cwd):
+                raise ValueError("该会话不在允许的项目路径范围内。")
+            if name:
+                await asyncio.to_thread(self.catalog.set_thread_name, binding.codex_thread_id, name)
+                text = f"标题已修改：{escape(name, quote=False)}"
+            else:
+                text = f"当前标题：{escape(summary.title, quote=False)}"
+        except Exception as exc:
+            text = f"无法{'修改' if name else '读取'}标题：{exc}"
+        await self._post_message(binding.channel_id, text, thread_ts=binding.thread_ts)
 
     async def mode(self, binding, argument: str = "") -> None:
         if argument not in {"", "plan", "default"}:

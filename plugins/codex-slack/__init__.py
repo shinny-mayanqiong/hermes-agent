@@ -30,7 +30,7 @@ from hermes_cli.config import load_config
 from .store import Binding, BindingConflict, BindingStore  # type: ignore[unresolved-import]
 from .progress import ProgressMirror, turn_progress
 from .controls import SessionControls
-from .browser import SessionBrowser, ACTION_PAGE, ACTION_RESUME, ACTION_ARCHIVE, ACTION_DELETE
+from .browser import SessionBrowser, ACTION_PAGE, ACTION_RESUME, ACTION_ARCHIVE
 
 logger = logging.getLogger(__name__)
 
@@ -437,7 +437,7 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
         if not cwd or not Path(cwd).is_absolute():
             return False
         try:
-            # Deleted worktrees must remain discoverable for archive/delete or
+            # Deleted worktrees must remain discoverable for archiving or
             # resuming in a replacement directory. Execution checks existence.
             resolved = Path(cwd).resolve()
         except (OSError, RuntimeError, ValueError):
@@ -512,7 +512,7 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
                 f"*Codex session {'已恢复' if resumed else '已创建'}*",
                 f"ID: `{summary.thread_id}`",
                 f"目录: `{summary.cwd}`",
-                "直接在此 thread 回复即可继续；`!mode plan` / `!mode default` 切换模式，`!status` 查看状态。\n`!stop` 停止任务并暂停推送；`!resume` 恢复同步。",
+                "直接在此 thread 回复即可继续；`!mode plan` / `!mode default` 切换模式，`!status` 查看状态。\n`!title [新标题]` 查看或修改标题；`!stop` 停止任务并暂停推送；`!resume` 恢复同步。",
             ]
         )
         try:
@@ -576,7 +576,7 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
     @staticmethod
     def usage() -> str:
         return (
-            "`/odoo-hedge-codex` 打开项目会话卡片（也支持下列参数）\n"
+            "`/odoo-hedge-codex` 打开项目会话列表（也支持下列参数）\n"
             "`/codex sessions [archived]` 查看项目 session\n"
             "`/codex new [目录]` 创建 session\n"
             "`/codex resume <session-id> [新目录]` 恢复 session"
@@ -1117,7 +1117,7 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
                 await self._post_ephemeral(channel_id, user_id, "该操作只能在 Codex home channel 执行。")
             return
         state = self._take_action(str(action.get("value") or ""), channel_id=channel_id)
-        if (state is None or state.kind not in {"page", "resume", "open", "archive", "delete"}
+        if (state is None or state.kind not in {"page", "resume", "open", "archive"}
                 or action_id.split(":", 1)[0] != f"codex_slack_{state.kind}"):
             await self._post_ephemeral(channel_id, user_id, "该操作已过期，请重新执行 `/codex sessions`。")
             return
@@ -1137,9 +1137,9 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
                 user_id=user_id,
                 restore_archived=bool(state.payload.get("archived")),
             )
-        elif state.kind in {"archive", "delete"}:
-            await self.manage_session(
-                state.kind, str(state.payload["codex_thread_id"]),
+        elif state.kind == "archive":
+            await self.archive_session(
+                str(state.payload["codex_thread_id"]),
                 channel_id=channel_id, user_id=user_id,
                 archived=bool(state.payload.get("archived")),
             )
@@ -1186,9 +1186,12 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
             elif lowered.split(None, 1)[0:1] == ["!mode"]:
                 parts = lowered.split(None, 1)
                 await self.mode(binding, parts[1] if len(parts) > 1 else "")
+            elif lowered.split(None, 1)[0:1] == ["!title"]:
+                parts = text.split(None, 1)
+                await self.title(binding, parts[1] if len(parts) > 1 else "")
             elif text.startswith("!"):
                 await self._post_message(channel_id,
-                    "控制命令：`!mode [plan|default]`、`!status`、`!stop`、`!resume`。",
+                    "控制命令：`!title [新标题]`、`!mode [plan|default]`、`!status`、`!stop`、`!resume`。",
                     thread_ts=thread_ts)
             elif text:
                 await self.enqueue_turn(binding, text, user_id)
@@ -1309,13 +1312,12 @@ def register(ctx) -> None:
         ACTION_PAGE,
         ACTION_RESUME,
         ACTION_ARCHIVE,
-        ACTION_DELETE,
         ACTION_OPEN,
         ACTION_APPROVE_ONCE,
         ACTION_APPROVE_SESSION,
         ACTION_DENY,
     ):
         pattern = (re.compile(rf"^{action_id}(?::[A-Za-z0-9_-]+)?$")
-                   if action_id in {ACTION_PAGE, ACTION_RESUME, ACTION_ARCHIVE, ACTION_DELETE}
+                   if action_id in {ACTION_PAGE, ACTION_RESUME, ACTION_ARCHIVE}
                    else action_id)
         ctx.register_slack_action_handler(pattern, _action_handler(action_id))

@@ -1,4 +1,4 @@
-"""Mode controls and durable pause semantics, including delivery races."""
+"""Session metadata controls and durable pause semantics, including delivery races."""
 
 import asyncio
 import sqlite3
@@ -10,6 +10,56 @@ import pytest
 from tests.plugins.test_codex_slack_plugin import (
     plugin, _manager, _binding, _event, _activity, _summary,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("paused", [False, True])
+async def test_title_reads_live_name_and_renames_without_starting_work(plugin, tmp_path, paused):
+    summary = _summary(cwd=tmp_path / "project", title="Original title")
+    manager = _manager(plugin, tmp_path, threads=[summary])
+    binding = _binding(plugin, manager)
+    manager.store.pause_sync(binding, paused)
+    await manager.handle_event(_event("!title   ", thread_id=binding.thread_ts))
+    assert manager.gateway.adapter.client.messages[-1]["text"] == "当前标题：Original title"
+    assert not manager.catalog.mutations
+
+    await manager.handle_event(_event("!TITLE Odoo  &amp; &lt;Stock&gt;", thread_id=binding.thread_ts))
+    assert manager.catalog.read_thread(binding.codex_thread_id).title == "Odoo  & <Stock>"
+    assert manager.catalog.mutations == [("rename", binding.codex_thread_id, "Odoo  & <Stock>")]
+    assert manager.gateway.adapter.client.messages[-1]["text"] == "标题已修改：Odoo  &amp; &lt;Stock&gt;"
+    assert manager.gateway.adapter.client.messages[-1]["thread_ts"] == binding.thread_ts
+
+    # A local client can rename the same session; reads must not use a Slack cache.
+    manager.catalog.threads = [replace(summary, title="Changed locally")]
+    await manager.handle_event(_event("!title", thread_id=binding.thread_ts))
+    assert manager.gateway.adapter.client.messages[-1]["text"] == "当前标题：Changed locally"
+    assert not manager._runtimes
+    assert not manager.gateway.adapter.sent
+    assert manager.store.by_codex(binding.codex_thread_id).sync_paused == paused
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["read", "write", "scope"])
+async def test_title_failure_does_not_change_name_or_start_work(plugin, tmp_path, failure):
+    summary = _summary(cwd=tmp_path / "project", title="Original title")
+    manager = _manager(plugin, tmp_path, threads=[summary])
+    binding = _binding(plugin, manager)
+
+    def fail(*args):
+        raise RuntimeError("offline")
+
+    if failure == "read":
+        manager.catalog.read_thread = fail
+    elif failure == "write":
+        manager.catalog.set_thread_name = fail
+    else:
+        manager.config = replace(manager.config, allowed_roots=(manager.config.default_cwd,))
+        manager.catalog.threads = [replace(summary, cwd=str(tmp_path / "other"))]
+    await manager.handle_event(_event("!title New title", thread_id=binding.thread_ts))
+    assert "无法修改标题" in manager.gateway.adapter.client.messages[-1]["text"]
+    assert manager.catalog.threads[0].title == "Original title"
+    assert not manager.catalog.mutations
+    assert not manager._runtimes
 
 
 @pytest.mark.asyncio

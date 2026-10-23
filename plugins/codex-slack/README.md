@@ -90,6 +90,10 @@ since Slack does not support custom slash commands inside message threads.
   worktree no longer exists.
 - `!status` — read current daemon status and recent progress inside a bound
   thread, including work started from the terminal.
+- `!title` — read the current Codex session title, including local changes.
+- `!title <new title>` — rename the Codex session without starting a task.
+  Titles preserve case and spaces. Refresh the session list to see the new name;
+  existing list messages are not rewritten.
 - `!mode` — query the session's current collaboration mode, including changes
   made by the local Codex client.
 - `!mode plan` / `!mode default` — switch to Plan (planning) or Default
@@ -105,7 +109,8 @@ since Slack does not support custom slash commands inside message threads.
   The session card's Resume button also restores delivery in its original thread.
 
 While paused, ordinary task messages are rejected with a `!resume` hint;
-`!status` and `!mode` remain available. Switching modes does not unpause delivery.
+`!title`, `!status`, and `!mode` remain available. Renaming or switching modes
+does not unpause delivery.
 For a running Plan session, use `!stop`, `!mode default`, `!resume`, then send
 the implementation task. Thread controls use `!` because custom Slack slash
 commands are not available inside threads; no new Slack app registration is needed.
@@ -144,34 +149,35 @@ plugin keeps the creating connection alive until that prompt arrives.
 Only text input is supported in v1. Codex's own permission configuration stays
 authoritative; approval requests appear as Slack buttons in the bound thread.
 
-## Session cards
+## Session list
 
-The ephemeral list shows 20 compact cards per page. Each card contains the ID
-(last four characters) and title, followed by creation time, update time, and
-the full path on separate lines. Text wraps in a single column; Resume / Archive /
-Delete sit in a separate action row below the card. There is no status column
-or horizontal table scrolling. Times include seconds and use the gateway host's
-local timezone, shown above the list. Only long titles are abbreviated; paths
-and timestamps are preserved in full. Exceptionally long paths use additional
-text sections, splitting a logical page across messages if needed to stay within
-Slack's block limits while keeping each card with its buttons.
-Buttons retain the full ID internally, so matching four-character suffixes do
-not select the wrong session.
+The ephemeral list shows 20 compact action rows per page. Each row contains
+`title · update time` and `Archive` buttons; clicking the
+first button resumes that session. The title and time are part of the Resume
+button, with no separate content rows. Long titles are abbreviated to keep the
+row compact. The first button's caption stays within 30 characters, reserving
+space for the timestamp. IDs, creation times, paths, and status are omitted
+from the list.
+Times use the gateway host's local timezone and `MM-DD HH:mm` format; dates
+outside the current year include the year. Slack may wrap buttons on narrow
+screens. The page header shows the archive filter and page number. Buttons
+retain the full ID internally, so identical titles target the correct session.
+Archive confirmations retain the short ID and a longer title.
 
 The list filters to `allowed_roots` and their descendants before filling each
 page. It excludes sibling prefixes and symlinks pointing outside the roots.
-Removed worktrees remain listed so their sessions can be archived, deleted, or
+Removed worktrees remain listed so their sessions can be archived or
 resumed with a replacement directory. The same scope applies to new sessions,
 resuming by ID, and continued work in existing bindings.
 
 Resume opens the original Slack thread if one already exists. In the archived
 view it first restores the Codex session. Archive pauses mirroring and preserves
-the binding and delivery checkpoints. Delete permanently removes Codex history;
-the original Slack messages and project files remain. Both actions use Slack
-confirmation dialogs explaining that Codex also processes spawned descendants.
-Active sessions must be stopped before archiving or deleting. Failed operations
+the binding and delivery checkpoints. Archive uses a Slack confirmation dialog
+explaining that Codex also processes spawned descendants.
+Active sessions must be stopped before archiving. Failed operations
 preserve the binding state; successful mutations invalidate old row buttons and
-refresh the list. The archived view offers Resume and Delete.
+refresh the list. The archived view only offers Resume. Session deletion is not
+available through this plugin.
 
 Protocol references: [Codex App Server](https://learn.chatgpt.com/docs/app-server)
 and [Slack sections](https://docs.slack.dev/reference/block-kit/blocks/section-block/)

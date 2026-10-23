@@ -206,6 +206,9 @@ class CodexThreadCatalog:
     def delete_thread(self, thread_id: str) -> None:
         self._request("thread/delete", {"threadId": str(thread_id)}, 30.0)
 
+    def set_thread_name(self, thread_id: str, name: str) -> None:
+        self._request("thread/name/set", {"threadId": str(thread_id), "name": name}, 30.0)
+
     def read_thread(
         self,
         thread_id: str,

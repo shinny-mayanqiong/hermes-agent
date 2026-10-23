@@ -165,9 +165,11 @@ class FakeCatalog:
         self.mutations.append(("unarchive", thread_id))
         self.archived_ids.discard(thread_id)
 
-    def delete_thread(self, thread_id):
-        self.mutations.append(("delete", thread_id))
-        self.threads = [thread for thread in self.threads if thread.thread_id != thread_id]
+    def set_thread_name(self, thread_id, name):
+        from dataclasses import replace
+        self.mutations.append(("rename", thread_id, name))
+        self.threads = [replace(thread, title=name) if thread.thread_id == thread_id else thread
+                        for thread in self.threads]
 
     def read_thread(self, thread_id):
         for thread in self.threads:
@@ -371,7 +373,9 @@ async def test_project_entry_opens_cards_without_arguments(plugin, tmp_path, ent
     await asyncio.gather(*manager._handlers)
     message = manager.gateway.adapter.client.ephemeral[-1]
     assert "最近的 Codex sessions" in message["text"]
-    assert any(block.get("expand") for block in message["blocks"])
+    assert any(block["type"] == "actions" and
+               block["elements"][0]["action_id"].startswith("codex_slack_resume:")
+               for block in message["blocks"])
 
 
 @pytest.mark.parametrize("text,expected", [
@@ -440,7 +444,9 @@ async def test_resume_can_replace_a_missing_original_cwd(plugin, tmp_path):
 
 @pytest.mark.asyncio
 async def test_sessions_page_is_ephemeral_has_twenty_limit_and_buttons(plugin, tmp_path):
+    from dataclasses import replace
     threads = [_summary(f"codex-{idx:04}", tmp_path / "project", f"Session {idx}") for idx in range(21)]
+    threads[0] = replace(threads[0], updated_at=120, recency_at=180)
     manager = _manager(plugin, tmp_path, threads=threads)
     _binding(plugin, manager, codex_id="codex-0000")
 
@@ -448,15 +454,17 @@ async def test_sessions_page_is_ephemeral_has_twenty_limit_and_buttons(plugin, t
 
     assert manager.catalog.list_calls[0] == {"cursor": None, "limit": 20, "archived": False}
     blocks = manager.gateway.adapter.client.ephemeral[-1]["blocks"]
-    cards = [block for block in blocks if block["type"] == "section" and block.get("expand")]
+    cards = [block for block in blocks if block["type"] == "actions" and
+             block["elements"][0]["action_id"].startswith("codex_slack_resume:")]
     assert len(cards) == 20
-    assert cards[0]["text"]["text"].startswith("0000 · Session 0\n")
-    assert "创建：1970-01-01 00:00:10" in cards[0]["text"]["text"]
-    assert "更新：1970-01-01 00:00:20" in cards[0]["text"]["text"]  # updatedAt, not recencyAt
+    assert cards[0]["elements"][0]["text"]["text"].startswith("Session 0 · ")
+    assert "创建" not in cards[0]["elements"][0]["text"]["text"]
+    assert "1970-01-01 00:02" in cards[0]["elements"][0]["text"]["text"]  # updatedAt, not recencyAt
     actions = [action for block in blocks[:-1] if block["type"] == "actions" for action in block["elements"]]
     assert len({action["action_id"] for action in actions}) == len(actions)
-    assert [action["text"]["text"] for action in actions[:3]] == ["Resume", "Archive", "Delete"]
-    assert "不可恢复" in actions[2]["confirm"]["text"]["text"]
+    assert actions[0]["accessibility_label"].startswith("Resume ")
+    assert actions[1]["text"]["text"] == "Archive"
+    assert "恢复" in actions[1]["confirm"]["text"]["text"]
     assert any(button["text"]["text"] == "Next" for button in blocks[-1]["elements"])
 
 
@@ -468,8 +476,8 @@ async def test_sessions_page_distinguishes_a_deleted_cwd_from_disallowed(plugin,
     await manager.show_sessions("C_HOME", "U_ME")
 
     blocks = manager.gateway.adapter.client.ephemeral[-1]["blocks"]
-    card = next(block for block in blocks if block["type"] == "section" and block.get("expand"))
-    assert str(missing) in card["text"]["text"]
+    card = next(block for block in blocks if block["type"] == "actions")
+    assert "Session" in card["elements"][0]["text"]["text"]
     resume = next(block for block in blocks if block["type"] == "actions")["elements"][0]
     await manager.handle_action(resume["action_id"], {"channel": {"id": "C_HOME"}, "user": {"id": "U_ME"}}, resume)
     assert "目录不存在" in manager.gateway.adapter.client.ephemeral[-1]["text"]
@@ -619,7 +627,6 @@ def test_register_exposes_command_hook_and_namespaced_actions(plugin):
         plugin.ACTION_RESUME,
         plugin.ACTION_OPEN,
         plugin.ACTION_ARCHIVE,
-        plugin.ACTION_DELETE,
         plugin.ACTION_APPROVE_ONCE,
         plugin.ACTION_APPROVE_SESSION,
         plugin.ACTION_DENY,
@@ -627,9 +634,12 @@ def test_register_exposes_command_hook_and_namespaced_actions(plugin):
         matches = [callback for pattern, callback in ctx.actions
                    if (pattern.fullmatch(action_id) if hasattr(pattern, "fullmatch") else pattern == action_id)]
         assert len(matches) == 1
-    for action_id in (plugin.ACTION_PAGE, plugin.ACTION_RESUME, plugin.ACTION_ARCHIVE, plugin.ACTION_DELETE):
+    for action_id in (plugin.ACTION_PAGE, plugin.ACTION_RESUME, plugin.ACTION_ARCHIVE):
         assert sum(bool(pattern.fullmatch(action_id + ":row-token")) for pattern, _ in ctx.actions
                    if hasattr(pattern, "fullmatch")) == 1
+    assert not any(pattern.fullmatch("codex_slack_delete:old-token")
+                   if hasattr(pattern, "fullmatch") else pattern == "codex_slack_delete"
+                   for pattern, _ in ctx.actions)
 
 
 def test_active_writer_error_is_user_friendly(plugin):

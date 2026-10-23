@@ -53,6 +53,9 @@ class Daemon:
             elif method == "thread/settings/update":
                 assert set(params) == {"threadId", "collaborationMode"}
                 self.modes[params["threadId"]] = params["collaborationMode"]
+            elif method == "thread/name/set":
+                assert set(params) == {"threadId", "name"}
+                self.threads[params["threadId"]]["name"] = params["name"]
             elif method == "turn/interrupt":
                 for turn in self.threads[params["threadId"]]["turns"]:
                     if turn["id"] == params["turnId"]:
@@ -65,8 +68,6 @@ class Daemon:
                 result = {"data": threads[offset:end], "nextCursor": str(end) if end < len(threads) else None}
             elif method in {"thread/archive", "thread/unarchive"}:
                 self.threads[params["threadId"]]["archived"] = method == "thread/archive"
-            elif method == "thread/delete":
-                self.threads.pop(params["threadId"])
             elif method == "thread/turns/list":
                 turns = list(reversed(self.threads[params["threadId"]]["turns"]))
                 offset = int(params.get("cursor", 0))
@@ -189,6 +190,16 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
             assert any(method == "initialize" and params.get("capabilities", {}).get("experimentalApi")
                        for method, params in daemon.requests)
 
+            await thread_command("!title Odoo &amp; 库存")
+            assert daemon.threads["thread-1"]["name"] == "Odoo & 库存"
+            await thread_command("!title")
+            assert "Odoo &amp; 库存" in api.messages[-1]["text"]
+            await project_slash()
+            assert any(element.get("text", {}).get("text", "").startswith("Odoo & 库存 · ")
+                       for block in api.ephemeral[-1]["blocks"] if block["type"] == "actions"
+                       for element in block["elements"])
+            assert not daemon.prompts
+
             await adapter._handle_slack_message({
                 "text": "do the work", "channel": "C_HOME", "user": "U_ME", "team": "T1",
                 "thread_ts": binding.thread_ts, "ts": "200.001", "channel_type": "channel",
@@ -237,6 +248,9 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
 
             await thread_command("!stop")
             assert manager.store.by_codex("thread-1").sync_paused
+            await thread_command("!title Paused Work")
+            assert daemon.threads["thread-1"]["name"] == "Paused Work"
+            assert manager.store.by_codex("thread-1").sync_paused
             await plugins.invoke_hook_async("on_gateway_stop", gateway=gateway)
             daemon.threads["thread-1"]["turns"].append({
                 "id": "paused-turn", "status": "completed", "completedAt": int(time.time()),
@@ -249,6 +263,8 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
             await manager._sync_binding(binding)
             assert len(api.messages) == before
             assert manager.store.by_codex("thread-1").sync_paused
+            await thread_command("!title")
+            assert "Paused Work" in api.messages[-1]["text"]
             await thread_command("!resume")
             await manager._sync_binding(binding)
             assert not any(m["text"] == "paused answer must not replay" for m in api.messages)
@@ -257,7 +273,7 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
             # Real discovered button handlers -> real RPC -> real binding store.
             async def click(label):
                 action = next(element for block in api.ephemeral[-1]["blocks"] if block["type"] == "actions"
-                              for element in block["elements"] if element["text"]["text"] == label)
+                              for element in block["elements"] if element["action_id"].startswith(f"codex_slack_{label.lower()}:"))
                 handlers = plugins.get_plugin_manager().get_slack_action_handlers()
                 callback = next(callback for pattern, callback, name in handlers
                                 if name == "codex-slack" and hasattr(pattern, "match") and pattern.match(action["action_id"]))
@@ -275,10 +291,8 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
             await click("Resume")
             assert not daemon.threads["thread-1"]["archived"]
             assert manager.store.by_codex("thread-1").thread_ts == binding.thread_ts
-            await manager.show_sessions("C_HOME", "U_ME")
-            await click("Delete")
-            assert "thread-1" not in daemon.threads
-            assert manager.store.by_codex("thread-1").state == "deleted"
+            assert manager.store.by_codex("thread-1").state == "active"
+            assert not any(method == "thread/delete" for method, _ in daemon.requests)
             assert daemon.prompts == ["do the work"]
         finally:
             await plugins.invoke_hook_async("on_gateway_stop", gateway=gateway)

@@ -10,11 +10,14 @@ from agent.transports.codex_app_server_session import CodexThreadPage
 ACTION_PAGE = "codex_slack_page"
 ACTION_RESUME = "codex_slack_resume"
 ACTION_ARCHIVE = "codex_slack_archive"
-ACTION_DELETE = "codex_slack_delete"
 
 
 def _date(timestamp: int) -> str:
-    return datetime.fromtimestamp(timestamp).astimezone().strftime("%Y-%m-%d %H:%M:%S") if timestamp else "—"
+    if not timestamp:
+        return "—"
+    updated = datetime.fromtimestamp(timestamp).astimezone()
+    pattern = "%m-%d %H:%M" if updated.year == datetime.now().astimezone().year else "%Y-%m-%d %H:%M"
+    return updated.strftime(pattern)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -59,8 +62,6 @@ class SessionBrowser:
         }
         if confirm:
             button["confirm"] = confirm
-        if kind == "delete":
-            button["style"] = "danger"
         return button
 
     async def show_sessions(self, channel_id, user_id, *, cursor=None, history=None,
@@ -77,11 +78,10 @@ class SessionBrowser:
         if notice:
             blocks.append({"type": "context", "elements": [{"type": "plain_text", "text": notice}]})
         blocks.append({"type": "context", "elements": [{"type": "plain_text", "text":
-            f"{'已归档' if archived else '未归档'} · 第 {len(history) + 1} 页 · "
-            f"时间 {datetime.now().astimezone().strftime('%Z %z')} · 路径范围："
-            + "、".join(self.config.allowed_roots)}]})
-        cards = [self._session_card(item, channel_id, archived=archived) for item in page.threads]
-        if not cards:
+            f"{'已归档' if archived else '未归档'} · 第 {len(history) + 1} 页 · 点击标题 Resume"}]})
+        for item in page.threads:
+            blocks.append(self._session_row(item, channel_id, archived=archived))
+        if not page.threads:
             blocks.append({"type": "section", "text": {"type": "plain_text", "text": "该范围内没有找到会话。"}})
         navigation = []
         if history:
@@ -92,55 +92,40 @@ class SessionBrowser:
                 "cursor": page.next_cursor, "history": [*history, cursor], "archived": archived}))
         navigation.append(self._session_button("page", "未归档" if archived else "已归档", channel_id,
                                                {"archived": not archived}))
-        # Keep each card and its buttons together. An unusually long path can
-        # require extra sections; split the logical page into messages rather
-        # than truncate data or exceed Slack's 50-block message limit.
-        batches = [[]]
-        for card in cards:
-            if len(blocks) + len(batches[-1]) + len(card) + 1 > 50:
-                batches.append([])
-            batches[-1].extend(card)
-        for index, batch in enumerate(batches):
-            footer = ({"type": "actions", "elements": navigation}
-                      if index == len(batches) - 1 else
-                      {"type": "context", "elements": [{"type": "plain_text", "text": "本页其余会话见下一条消息。"}]})
-            await self._post_ephemeral(channel_id, user_id, heading, blocks=[*blocks, *batch, footer])
+        blocks.append({"type": "actions", "elements": navigation})
+        await self._post_ephemeral(channel_id, user_id, heading, blocks=blocks)
         self._discard_slash_context(channel_id)
 
-    def _session_card(self, item, channel_id, *, archived=False) -> list[dict]:
-        text = (f"{item.thread_id[-4:]} · {_clip(item.title, 160)}\n"
-                f"创建：{_date(item.created_at)}\n"
-                f"更新：{_date(item.updated_at)}\n"
-                f"路径：{item.cwd or '—'}")
-        # Single-column text wraps naturally on narrow Slack clients. Preserve
-        # full timestamps and paths, including spaces and long worktree names.
-        blocks = [{"type": "section", "expand": True,
-                   "text": {"type": "plain_text", "emoji": False, "text": text[offset:offset + 3000]}}
-                  for offset in range(0, len(text), 3000)]
+    def _session_row(self, item, channel_id, *, archived=False) -> dict:
+        # Put the title and date inside Resume so both controls share a row.
         payload = {"codex_thread_id": item.thread_id, "archived": archived}
         actions = []
-        for kind, label in (("resume", "Resume"), ("archive", "Archive"), ("delete", "Delete")):
+        for kind, label in (("resume", "Resume"), ("archive", "Archive")):
             if kind == "archive" and archived:
                 continue
             confirm = None
-            if kind in {"archive", "delete"}:
-                verb = "永久删除" if kind == "delete" else "归档"
-                consequence = ("此操作不可恢复；仅删除会话记录，不删除项目文件。"
-                               if kind == "delete" else "可从“已归档”列表 Resume 恢复。")
+            if kind == "archive":
                 confirm = {
-                    "title": {"type": "plain_text", "text": f"{verb}会话？"},
+                    "title": {"type": "plain_text", "text": "归档会话？"},
                     "text": {"type": "plain_text", "text":
                         f"{item.thread_id[-4:]} · {_clip(item.title, 90)}\n"
-                        f"将{verb}该会话及其派生子会话的记录。{consequence}"},
+                        "将归档该会话及其派生子会话的记录。可从“已归档”列表 Resume 恢复。"},
                     "confirm": {"type": "plain_text", "text": label},
                     "deny": {"type": "plain_text", "text": "取消"},
                 }
-            actions.append(self._session_button(kind, label, channel_id, payload, confirm=confirm))
-        blocks.append({"type": "actions", "elements": actions})
-        return blocks
+            if kind == "resume":
+                updated = _date(item.updated_at)
+                # Slack can truncate button captions around 30 characters.
+                # Reserve space for the whole timestamp before clipping titles.
+                label = f"{_clip(item.title, 30 - len(updated) - 3)} · {updated}"
+            button = self._session_button(kind, label, channel_id, payload, confirm=confirm)
+            if kind == "resume":
+                button["accessibility_label"] = _clip(f"Resume {item.title}", 75)
+            actions.append(button)
+        return {"type": "actions", "elements": actions}
 
-    async def manage_session(self, kind, thread_id, *, channel_id, user_id, archived=False) -> None:
-        """Only explicit card actions may archive/delete; never interrupt work."""
+    async def archive_session(self, thread_id, *, channel_id, user_id, archived=False) -> None:
+        """Only explicit list actions may archive; never interrupt work."""
         if thread_id in self._managing_sessions:
             await self._post_ephemeral(channel_id, user_id, "该会话正在处理操作，请稍后重试。")
             return
@@ -160,11 +145,10 @@ class SessionBrowser:
                     turn.get("status") == "inProgress" for turn in snapshot.get("turns", [])
                 ):
                     raise ValueError("该会话正在运行，请先停止运行，再执行此操作。")
-                operation = self.catalog.archive_thread if kind == "archive" else self.catalog.delete_thread
-                await asyncio.to_thread(operation, thread_id)
+                await asyncio.to_thread(self.catalog.archive_thread, thread_id)
                 binding = self.store.by_codex(thread_id)
                 if binding:
-                    self.store.set_state(binding, "archived" if kind == "archive" else "deleted")
+                    self.store.set_state(binding, "archived")
                 if runtime:
                     await self._close_runtime(runtime)
                     self._runtimes.pop(thread_id, None)
@@ -177,5 +161,4 @@ class SessionBrowser:
             return
         finally:
             self._managing_sessions.discard(thread_id)
-        verb = "已归档" if kind == "archive" else "已永久删除"
-        await self.show_sessions(channel_id, user_id, archived=archived, notice=f"{thread_id[-4:]} {verb}。")
+        await self.show_sessions(channel_id, user_id, archived=archived, notice=f"{thread_id[-4:]} 已归档。")
