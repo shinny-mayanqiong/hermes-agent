@@ -24,6 +24,8 @@ class Daemon:
         self.requests = []
         self.prompts = []
         self.approvals = []
+        self.modes = {}
+        self.turn_modes = []
 
     def handle(self, ws):
         for raw in ws:
@@ -40,9 +42,21 @@ class Daemon:
                     "createdAt": int(time.time()), "updatedAt": int(time.time()),
                     "status": {"type": "idle"}, "turns": [],
                 }
-                result = {"thread": self.threads[thread_id]}
+                self.modes[thread_id] = {"mode": "default", "settings": {
+                    "model": "test-codex-model", "reasoning_effort": "high", "developer_instructions": None,
+                }}
+                result = {"thread": self.threads[thread_id], "model": "test-codex-model",
+                          "reasoningEffort": "high", "collaborationMode": self.modes[thread_id]}
             elif method in {"thread/read", "thread/resume"}:
-                result = {"thread": self.threads[params["threadId"]]}
+                result = {"thread": self.threads[params["threadId"]], "model": "test-codex-model",
+                          "reasoningEffort": "high", "collaborationMode": self.modes[params["threadId"]]}
+            elif method == "thread/settings/update":
+                assert set(params) == {"threadId", "collaborationMode"}
+                self.modes[params["threadId"]] = params["collaborationMode"]
+            elif method == "turn/interrupt":
+                for turn in self.threads[params["threadId"]]["turns"]:
+                    if turn["id"] == params["turnId"]:
+                        turn["status"] = "interrupted"
             elif method == "thread/list":
                 threads = [thread for thread in self.threads.values()
                            if thread.get("archived", False) == params.get("archived", False)]
@@ -61,6 +75,7 @@ class Daemon:
             elif method == "turn/start":
                 thread = self.threads[params["threadId"]]
                 self.prompts.append(params["input"][0]["text"])
+                self.turn_modes.append(self.modes[params["threadId"]]["mode"])
                 turn = {"id": f"turn-{len(thread['turns']) + 1}", "status": "inProgress", "items": []}
                 thread["turns"].append(turn)
                 thread["status"] = {"type": "active"}
@@ -155,6 +170,25 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
             assert binding.cwd == str(repo)
             assert manager.store.path.parent == home / "state"
 
+            async def thread_command(text):
+                await adapter._handle_slack_message({
+                    "text": text, "channel": "C_HOME", "user": "U_ME", "team": "T1",
+                    "thread_ts": binding.thread_ts, "ts": str(time.time()), "channel_type": "channel",
+                })
+                await asyncio.gather(*manager._handlers)
+
+            await thread_command("!mode plan")
+            assert daemon.modes["thread-1"]["mode"] == "plan"
+            await thread_command("!mode")
+            assert "Plan" in api.messages[-1]["text"]
+            await thread_command("!mode default")
+            assert daemon.modes["thread-1"]["mode"] == "default"
+            assert daemon.modes["thread-1"]["settings"]["model"] == "test-codex-model"
+            assert daemon.modes["thread-1"]["settings"]["reasoning_effort"] == "high"
+            assert not daemon.prompts  # Controls never invoke a model.
+            assert any(method == "initialize" and params.get("capabilities", {}).get("experimentalApi")
+                       for method, params in daemon.requests)
+
             await adapter._handle_slack_message({
                 "text": "do the work", "channel": "C_HOME", "user": "U_ME", "team": "T1",
                 "thread_ts": binding.thread_ts, "ts": "200.001", "channel_type": "channel",
@@ -166,6 +200,7 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
                 {"value": token})
             await eventually(lambda: manager.store.progress("thread-1", "turn-1"))
             assert daemon.prompts == ["do the work"]  # No Slack transcript injection.
+            assert daemon.turn_modes == ["default"]
             assert daemon.approvals[0]["result"] == {"decision": "accept"}
             assert any(message["text"] == "wire answer" and message.get("thread_ts") == binding.thread_ts
                        for message in api.messages)
@@ -199,6 +234,25 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
             await asyncio.gather(*manager._handlers)
             assert "状态：" in api.messages[-1]["text"]
             assert daemon.prompts == ["do the work"]
+
+            await thread_command("!stop")
+            assert manager.store.by_codex("thread-1").sync_paused
+            await plugins.invoke_hook_async("on_gateway_stop", gateway=gateway)
+            daemon.threads["thread-1"]["turns"].append({
+                "id": "paused-turn", "status": "completed", "completedAt": int(time.time()),
+                "items": [{"type": "agentMessage", "text": "paused answer must not replay"}],
+            })
+            module._MANAGER = None
+            await plugins.invoke_hook_async("on_gateway_start", gateway=gateway)
+            manager = module._manager()
+            before = len(api.messages)
+            await manager._sync_binding(binding)
+            assert len(api.messages) == before
+            assert manager.store.by_codex("thread-1").sync_paused
+            await thread_command("!resume")
+            await manager._sync_binding(binding)
+            assert not any(m["text"] == "paused answer must not replay" for m in api.messages)
+            assert not manager.store.by_codex("thread-1").sync_paused
 
             # Real discovered button handlers -> real RPC -> real binding store.
             async def click(label):

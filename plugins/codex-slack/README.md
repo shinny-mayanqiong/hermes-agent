@@ -90,13 +90,38 @@ since Slack does not support custom slash commands inside message threads.
   worktree no longer exists.
 - `!status` — read current daemon status and recent progress inside a bound
   thread, including work started from the terminal.
-- `!stop` — interrupt the active turn, clear queued messages, and close the
-  local app-server process. The binding and Codex history remain, so the next
-  message resumes the same session.
+- `!mode` — query the session's current collaboration mode, including changes
+  made by the local Codex client.
+- `!mode plan` / `!mode default` — switch to Plan (planning) or Default
+  (execution) through Codex's session settings API. The command itself does not
+  start a task. It preserves the current model, reasoning effort, and permissions.
+  An active task must be stopped before switching; plain text such as
+  “执行模式” is a prompt and cannot change the mode.
+- `!stop` — pause automatic delivery, request interruption of the active turn,
+  clear queued messages, and release Hermes' connection. The pause survives
+  gateway restarts. The binding and Codex history remain intact.
+- `!resume` — explicitly restore automatic delivery. Completed history from
+  the paused interval is skipped; current and future progress can be delivered.
+  The session card's Resume button also restores delivery in its original thread.
+
+While paused, ordinary task messages are rejected with a `!resume` hint;
+`!status` and `!mode` remain available. Switching modes does not unpause delivery.
+For a running Plan session, use `!stop`, `!mode default`, `!resume`, then send
+the implementation task. Thread controls use `!` because custom Slack slash
+commands are not available inside threads; no new Slack app registration is needed.
+
+Mode controls require a Codex app-server supporting the experimental
+`thread/settings/update` API (verified with 0.163.0). Mode selection belongs to
+the Codex session, so local clients and Slack use the same setting. Unsupported
+servers report an error instead of sending a pretend mode-switching prompt.
 
 In shared-daemon mode `!stop` also interrupts a turn started from the terminal;
 it disconnects Hermes' client without stopping the shared daemon. A gateway
 shutdown disconnects its clients without interrupting daemon-owned work.
+Stopping one thread does not disable delivery for other bound sessions. An
+already-started delivery is drained before the stop acknowledgement is posted.
+If the daemon is unavailable, delivery still pauses and the reply reports that
+task interruption could not be confirmed.
 
 Codex only persists a new session after its first user message. Send the first
 prompt in the new Slack thread before restarting the daemon or gateway; the

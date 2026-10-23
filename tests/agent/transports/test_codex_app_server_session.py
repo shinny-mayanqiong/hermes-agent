@@ -592,9 +592,15 @@ class TestRunTurn:
         )
         s = make_session(client)
         s.ensure_started()
-        # Trip the interrupt before run_turn even consumes the notification.
-        # The loop will see interrupt set on its first iteration and bail.
-        s.request_interrupt()
+        # Interrupt after submission, before the loop consumes notifications.
+        # A pre-submission stop must prevent turn/start entirely (covered below).
+        def respond(method, params):
+            if method == "turn/start":
+                s.request_interrupt()
+                return {"turn": {"id": "turn-fake-001"}}
+            return {}
+
+        client._request_handler = respond
         r = s.run_turn("loop forever", turn_timeout=2.0)
         assert r.interrupted is True
         # turn/interrupt was requested with the right turnId
@@ -1288,3 +1294,81 @@ class TestClassifyOAuthFailure:
             "[stderr] token has expired, run codex login",
         )
         assert hint is not None
+
+
+class TestCollaborationModeSettings:
+    @pytest.mark.parametrize("mode", ["plan", "default"])
+    def test_switch_preserves_model_effort_and_does_not_start_turn(self, mode):
+        client = FakeClient()
+        state = {"thread": {"id": "thread-1", "status": {"type": "idle"}},
+                 "model": "current-model", "reasoningEffort": "high",
+                 "collaborationMode": {"mode": "plan", "settings": {
+                     "model": "current-model", "reasoning_effort": "high",
+                     "developer_instructions": "old plan instructions",
+                 }}}
+
+        def respond(method, params):
+            if method == "thread/settings/update":
+                assert set(params) == {"threadId", "collaborationMode"}
+                state["collaborationMode"] = params["collaborationMode"]
+                return {}
+            return state.copy()
+
+        client._request_handler = respond
+        session = make_session(client, resume_thread_id="thread-1", enable_collaboration_modes=True)
+        updated = session.set_collaboration_mode(mode)
+        assert updated["collaborationMode"] == {"mode": mode, "settings": {
+            "model": "current-model", "reasoning_effort": "high", "developer_instructions": None,
+        }}
+        assert not any(method.startswith("turn/") for method, _ in client.requests)
+        # A local client can change it afterwards; do not pin a stale Slack value.
+        state["collaborationMode"]["mode"] = "plan" if mode == "default" else "default"
+        assert session.read_settings()["collaborationMode"]["mode"] != mode
+
+    def test_active_turn_cannot_be_silently_switched(self):
+        client = FakeClient()
+        client._request_handler = lambda method, params: {
+            "thread": {"id": "thread-1", "status": {"type": "active"}}, "model": "current-model",
+        }
+        session = make_session(client, enable_collaboration_modes=True)
+        with pytest.raises(ValueError, match="!stop"):
+            session.set_collaboration_mode("default")
+        assert not any(method == "thread/settings/update" for method, _ in client.requests)
+
+    def test_unsupported_settings_update_does_not_claim_success(self):
+        from agent.transports.codex_app_server import CodexAppServerError
+        client = FakeClient()
+
+        def respond(method, params):
+            if method == "thread/settings/update":
+                raise CodexAppServerError(code=-32601, message="unsupported settings update")
+            return {"thread": {"id": "thread-1"}, "model": "current-model"}
+
+        client._request_handler = respond
+        session = make_session(client, enable_collaboration_modes=True)
+        with pytest.raises(CodexAppServerError, match="unsupported"):
+            session.set_collaboration_mode("default")
+        assert not session._settings.get("collaborationMode")
+
+
+class TestInterruptDuringStartup:
+    def test_stop_before_worker_starts_never_submits_a_prompt(self):
+        client = FakeClient()
+        session = make_session(client)
+        session.request_interrupt()
+        assert session.run_turn("must not run").interrupted
+        assert client.requests == []
+
+    def test_stop_during_handshake_is_not_cleared_before_turn_start(self):
+        client = FakeClient()
+        session = make_session(client)
+
+        def respond(method, params):
+            if method == "thread/start":
+                session.request_interrupt()
+                return {"thread": {"id": "thread-1"}}
+            return {}
+
+        client._request_handler = respond
+        assert session.run_turn("must not run").interrupted
+        assert not any(method in {"turn/start", "turn/steer"} for method, _ in client.requests)

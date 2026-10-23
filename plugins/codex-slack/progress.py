@@ -101,7 +101,7 @@ class ProgressMirror:
 
     async def _sync_binding_locked(self, binding, *, initialize: bool = False) -> None:
         current = self.store.by_codex(binding.codex_thread_id)
-        if not current or current.state != "active" or not self._cwd_allowed(current.cwd):
+        if not current or current.state != "active" or current.sync_paused or not self._cwd_allowed(current.cwd):
             return
         runtime = self._runtimes.get(binding.codex_thread_id)
         if runtime and runtime.active:
@@ -113,7 +113,8 @@ class ProgressMirror:
         )
         # A Slack turn can start while the read is in flight.
         runtime = self._runtimes.get(binding.codex_thread_id)
-        if runtime and runtime.active:
+        current = self.store.by_codex(binding.codex_thread_id)
+        if not current or current.sync_paused or (runtime and runtime.active):
             return
         turns = snapshot.get("turns") or []
         if previous:
@@ -122,6 +123,9 @@ class ProgressMirror:
                     turns = turns[index:]
                     break
         for turn in turns:
+            current = self.store.by_codex(binding.codex_thread_id)
+            if not current or current.sync_paused:
+                return
             turn_id = str(turn.get("id") or "")
             if not turn_id:
                 continue
@@ -157,6 +161,9 @@ class ProgressMirror:
                 self.store.save_progress(binding.codex_thread_id, turn_id,
                                          message_ts=message_ts, digest=digest)
             if done:
+                current = self.store.by_codex(binding.codex_thread_id)
+                if not current or current.sync_paused:
+                    return
                 answer = final_text(turn)
                 if answer:
                     await self._send_final(binding, answer)

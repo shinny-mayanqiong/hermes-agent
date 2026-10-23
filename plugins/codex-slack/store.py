@@ -22,6 +22,7 @@ class Binding:
     created_at: float
     last_used_at: float
     state: str = "active"
+    sync_paused: bool = False
 
 
 class BindingConflict(RuntimeError):
@@ -74,6 +75,8 @@ class BindingStore:
         )
         if "state" not in {row["name"] for row in conn.execute("PRAGMA table_info(bindings)")}:
             conn.execute("ALTER TABLE bindings ADD COLUMN state TEXT NOT NULL DEFAULT 'active'")
+        if "sync_paused" not in {row["name"] for row in conn.execute("PRAGMA table_info(bindings)")}:
+            conn.execute("ALTER TABLE bindings ADD COLUMN sync_paused INTEGER NOT NULL DEFAULT 0")
         return conn
 
     @contextmanager
@@ -102,6 +105,7 @@ class BindingStore:
             created_at=float(row["created_at"]),
             last_used_at=float(row["last_used_at"]),
             state=str(row["state"]),
+            sync_paused=bool(row["sync_paused"]),
         )
 
     def create(self, binding: Binding) -> None:
@@ -111,8 +115,8 @@ class BindingStore:
                     """
                     INSERT INTO bindings(
                         team_id, channel_id, thread_ts, user_id,
-                        codex_thread_id, cwd, created_at, last_used_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        codex_thread_id, cwd, created_at, last_used_at, sync_paused
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         binding.team_id,
@@ -123,6 +127,7 @@ class BindingStore:
                         binding.cwd,
                         binding.created_at,
                         binding.last_used_at,
+                        int(binding.sync_paused),
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -177,7 +182,7 @@ class BindingStore:
     def in_channel(self, channel_id: str) -> list[Binding]:
         with self._lock, self._connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM bindings WHERE channel_id=? AND state='active' ORDER BY last_used_at DESC",
+                "SELECT * FROM bindings WHERE channel_id=? AND state='active' AND sync_paused=0 ORDER BY last_used_at DESC",
                 (channel_id,),
             ).fetchall()
         return [self._binding(row) for row in rows]
@@ -190,6 +195,15 @@ class BindingStore:
                          (state, binding.codex_thread_id))
             if state == "deleted":
                 conn.execute("DELETE FROM progress WHERE codex_thread_id=?", (binding.codex_thread_id,))
+
+    def pause_sync(self, binding: Binding, paused: bool) -> None:
+        with self._lock, self._connection() as conn:
+            conn.execute("UPDATE bindings SET sync_paused=? WHERE codex_thread_id=?",
+                         (int(paused), binding.codex_thread_id))
+
+    def reset_progress(self, binding: Binding) -> None:
+        with self._lock, self._connection() as conn:
+            conn.execute("DELETE FROM progress WHERE codex_thread_id=?", (binding.codex_thread_id,))
 
     def progress(self, thread_id: str, turn_id: str = "") -> Optional[dict]:
         with self._lock, self._connection() as conn:

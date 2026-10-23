@@ -145,6 +145,9 @@ class FakeCatalog:
 
     def interrupt_turn(self, thread_id, turn_id):
         self.interrupts.append((thread_id, turn_id))
+        for turn in self.activity.get("turns", []):
+            if turn["id"] == turn_id:
+                turn["status"] = "interrupted"
 
     def list_threads(self, **kwargs):
         self.list_calls.append(kwargs)
@@ -185,6 +188,7 @@ class FakeSession:
         self.on_event = on_event
         self.closed = False
         self.interrupted = False
+        self.mode = "default"
         FakeSession.instances.append(self)
 
     def ensure_started(self):
@@ -197,6 +201,13 @@ class FakeSession:
 
     def request_interrupt(self):
         self.interrupted = True
+
+    def read_settings(self):
+        return {"collaborationMode": {"mode": self.mode}}
+
+    def set_collaboration_mode(self, mode):
+        self.mode = mode
+        return self.read_settings()
 
     def close(self):
         self.closed = True
@@ -486,7 +497,7 @@ async def test_bound_thread_turn_then_stop_releases_process_and_preserves_bindin
     assert persisted.codex_thread_id == binding.codex_thread_id
     assert persisted.thread_ts == binding.thread_ts
     assert binding.codex_thread_id not in manager._runtimes
-    assert "已停止并释放资源" in manager.gateway.adapter.client.messages[-1]["text"]
+    assert "已暂停自动推送" in manager.gateway.adapter.client.messages[-1]["text"]
     if manager._reaper:
         manager._reaper.cancel()
 

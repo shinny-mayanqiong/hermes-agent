@@ -28,7 +28,8 @@ from hermes_constants import get_hermes_home
 from hermes_cli.config import load_config
 
 from .store import Binding, BindingConflict, BindingStore  # type: ignore[unresolved-import]
-from .progress import ProgressMirror, activity_text, turn_progress
+from .progress import ProgressMirror, turn_progress
+from .controls import SessionControls
 from .browser import SessionBrowser, ACTION_PAGE, ACTION_RESUME, ACTION_ARCHIVE, ACTION_DELETE
 
 logger = logging.getLogger(__name__)
@@ -226,7 +227,7 @@ def _friendly_codex_error(exc: Exception) -> str:
     return f"Codex 操作失败：{message}"
 
 
-class CodexSlackManager(ProgressMirror, SessionBrowser):
+class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
     def __init__(
         self,
         *,
@@ -246,10 +247,11 @@ class CodexSlackManager(ProgressMirror, SessionBrowser):
                 CodexAppServerSession,
                 client_factory=client_factory,
                 allow_active_turn_steer=True,
+                enable_collaboration_modes=True,
             )
         else:
             self.catalog = catalog or CodexThreadCatalog()
-            self.session_factory = session_factory or CodexAppServerSession
+            self.session_factory = session_factory or partial(CodexAppServerSession, enable_collaboration_modes=True)
         self.gateway: Any = None
         self._runtimes: OrderedDict[str, _Runtime] = OrderedDict()
         self._actions: dict[str, _ActionState] = {}
@@ -260,6 +262,7 @@ class CodexSlackManager(ProgressMirror, SessionBrowser):
         self._handlers: set[asyncio.Task] = set()
         self._shutting_down = False
         self._mirror_locks: dict[str, asyncio.Lock] = {}
+        self._control_locks: dict[str, asyncio.Lock] = {}
         self._managing_sessions: set[str] = set()
 
     # ---------- gateway + Slack helpers ----------
@@ -460,6 +463,10 @@ class CodexSlackManager(ProgressMirror, SessionBrowser):
         if existing:
             link = await self._permalink(existing)
             if link:
+                if existing.sync_paused:
+                    async with self._control_lock(existing):
+                        if not await self.resume_sync(existing):
+                            return existing
                 await self._post_ephemeral(
                     channel_id,
                     user_id,
@@ -505,7 +512,7 @@ class CodexSlackManager(ProgressMirror, SessionBrowser):
                 f"*Codex session {'已恢复' if resumed else '已创建'}*",
                 f"ID: `{summary.thread_id}`",
                 f"目录: `{summary.cwd}`",
-                "直接在此 thread 回复即可继续；`!status` 查看状态，`!stop` 停止并释放进程。",
+                "直接在此 thread 回复即可继续；`!mode plan` / `!mode default` 切换模式，`!status` 查看状态。\n`!stop` 停止任务并暂停推送；`!resume` 恢复同步。",
             ]
         )
         try:
@@ -806,6 +813,10 @@ class CodexSlackManager(ProgressMirror, SessionBrowser):
             await self._post_ephemeral(binding.channel_id, user_id,
                                        "该会话当前不可运行，请重新打开 `/codex sessions`。")
             return
+        if current.sync_paused:
+            await self._post_message(binding.channel_id, "此 thread 已暂停，请先 `!resume`，再发送任务。",
+                                     thread_ts=binding.thread_ts)
+            return
         self._ensure_reaper()
         runtime = self._runtime(binding)
         if runtime.stopping or self._shutting_down:
@@ -862,8 +873,12 @@ class CodexSlackManager(ProgressMirror, SessionBrowser):
                 lock = self._mirror_locks.setdefault(runtime.binding.codex_thread_id, asyncio.Lock())
                 async with lock:
                     pass
+                if runtime.stopping:
+                    break
                 if not await self._ensure_session(runtime):
                     runtime.queue.clear()
+                    break
+                if runtime.stopping:
                     break
                 response = await self._post_message(
                     runtime.binding.channel_id,
@@ -872,6 +887,8 @@ class CodexSlackManager(ProgressMirror, SessionBrowser):
                 )
                 runtime.progress_ts = str(response.get("ts") or "")
                 runtime.progress_updated_at = 0.0
+                if runtime.stopping:
+                    break
                 session = runtime.session
                 assert session is not None
                 result = await asyncio.to_thread(session.run_turn, item.text)
@@ -970,74 +987,6 @@ class CodexSlackManager(ProgressMirror, SessionBrowser):
             runtime.progress_updated_at = now
             await self._edit_message(runtime.binding.channel_id, runtime.progress_ts, text)
 
-    async def status(self, binding: Binding) -> None:
-        runtime = self._runtimes.get(binding.codex_thread_id)
-        detail = ""
-        if self.config.shared_daemon:
-            try:
-                snapshot = await asyncio.to_thread(self.catalog.read_activity, binding.codex_thread_id)
-                state = activity_text(snapshot)
-                turns = snapshot.get("turns") or []
-                if turns:
-                    detail = "\n最近进展：" + turn_progress(turns[-1])
-            except Exception as exc:
-                state = "无法连接 Codex（状态未知）"
-                detail = f"\n{exc}"
-        elif runtime and runtime.active:
-            state = "运行中"
-        elif runtime and runtime.session is not None:
-            state = "空闲（进程已缓存）"
-        else:
-            state = "休眠（无运行进程）"
-        queued = len(runtime.queue) if runtime else 0
-        await self._post_message(
-            binding.channel_id,
-            f"状态：*{state}*\nCodex ID：`{binding.codex_thread_id}`\n目录：`{binding.cwd}`\n排队：{queued}{detail}",
-            thread_ts=binding.thread_ts,
-        )
-
-    async def stop(self, binding: Binding) -> None:
-        runtime = self._runtimes.get(binding.codex_thread_id)
-        if self.config.shared_daemon and not (runtime and runtime.active):
-            try:
-                snapshot = await asyncio.to_thread(self.catalog.read_activity, binding.codex_thread_id)
-                for turn in reversed(snapshot.get("turns") or []):
-                    if turn.get("status") == "inProgress":
-                        await asyncio.to_thread(self.catalog.interrupt_turn, binding.codex_thread_id, turn["id"])
-                        break
-            except Exception as exc:
-                await self._post_message(binding.channel_id, f"无法确认 Codex 已停止：{exc}", thread_ts=binding.thread_ts)
-                return
-        if runtime is None:
-            await self._post_message(
-                binding.channel_id,
-                "已停止并释放资源；下次消息将自动恢复原 Codex session。",
-                thread_ts=binding.thread_ts,
-            )
-            return
-        runtime.stopping = True
-        dropped = len(runtime.queue)
-        runtime.queue.clear()
-        self._deny_pending_approvals(binding)
-        if runtime.session is not None:
-            runtime.session.request_interrupt()
-        worker = runtime.worker
-        if worker is not None and worker is not asyncio.current_task():
-            try:
-                await asyncio.wait_for(asyncio.shield(worker), timeout=10)
-            except asyncio.TimeoutError:
-                await self._close_runtime(runtime)
-                self._runtimes.pop(binding.codex_thread_id, None)
-        else:
-            await self._close_runtime(runtime)
-            self._runtimes.pop(binding.codex_thread_id, None)
-        suffix = f"，并清空 {dropped} 条排队消息" if dropped else ""
-        await self._post_message(
-            binding.channel_id,
-            f"已停止并释放资源{suffix}；下次消息将自动恢复原 Codex session。",
-            thread_ts=binding.thread_ts,
-        )
-
     def _deny_pending_approvals(self, binding: Binding) -> None:
         with self._action_lock:
             pending = [
@@ -1084,6 +1033,15 @@ class CodexSlackManager(ProgressMirror, SessionBrowser):
         return callback
 
     async def _post_approval(self, token: str, pending: _PendingApproval) -> None:
+        lock = self._mirror_locks.setdefault(pending.binding.codex_thread_id, asyncio.Lock())
+        async with lock:
+            await self._post_approval_locked(token, pending)
+
+    async def _post_approval_locked(self, token: str, pending: _PendingApproval) -> None:
+        current = self.store.by_codex(pending.binding.codex_thread_id)
+        if not current or current.sync_paused:
+            pending.event.set()
+            return
         description = pending.description[:1500]
         command = pending.command[:700]
         blocks = [
@@ -1217,15 +1175,25 @@ class CodexSlackManager(ProgressMirror, SessionBrowser):
         if not self._cwd_allowed(binding.cwd):
             await self._post_ephemeral(channel_id, user_id, "该会话不在允许的项目路径范围内。", thread_ts=thread_ts)
             return
-        lowered = text.lower()
-        if lowered == "!status":
-            await self.status(binding)
-        elif lowered == "!stop":
-            await self.stop(binding)
-        elif text:
-            await self.enqueue_turn(binding, text, user_id)
-        else:
-            await self._post_message(channel_id, "目前只支持文本消息。", thread_ts=thread_ts)
+        async with self._control_lock(binding):
+            lowered = text.lower()
+            if lowered == "!status":
+                await self.status(binding)
+            elif lowered == "!stop":
+                await self.stop(binding)
+            elif lowered == "!resume":
+                await self.resume_sync(binding)
+            elif lowered.split(None, 1)[0:1] == ["!mode"]:
+                parts = lowered.split(None, 1)
+                await self.mode(binding, parts[1] if len(parts) > 1 else "")
+            elif text.startswith("!"):
+                await self._post_message(channel_id,
+                    "控制命令：`!mode [plan|default]`、`!status`、`!stop`、`!resume`。",
+                    thread_ts=thread_ts)
+            elif text:
+                await self.enqueue_turn(binding, text, user_id)
+            else:
+                await self._post_message(channel_id, "目前只支持文本消息。", thread_ts=thread_ts)
 
     def pre_dispatch(self, event: Any, gateway: Any) -> Optional[dict[str, str]]:
         source = getattr(event, "source", None)

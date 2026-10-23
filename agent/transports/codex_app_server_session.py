@@ -400,6 +400,7 @@ class CodexAppServerSession:
         approval_callback: Optional[Callable[..., str]] = None,
         on_event: Optional[Callable[[dict], None]] = None,
         allow_active_turn_steer: bool = False,
+        enable_collaboration_modes: bool = False,
         request_routing: Optional[_ServerRequestRouting] = None,
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
     ) -> None:
@@ -416,6 +417,8 @@ class CodexAppServerSession:
         self._approval_callback = approval_callback
         self._on_event = on_event  # Display hook (kawaii spinner ticks etc.)
         self._allow_active_turn_steer = bool(allow_active_turn_steer)
+        self._enable_collaboration_modes = enable_collaboration_modes
+        self._settings: dict[str, Any] = {}
         self._routing = request_routing or _ServerRequestRouting()
         self._client_factory = client_factory or CodexAppServerClient
 
@@ -447,6 +450,7 @@ class CodexAppServerSession:
             client_name="hermes",
             client_title="Hermes Agent",
             client_version=_get_hermes_version(),
+            **({"capabilities": {"experimentalApi": True}} if self._enable_collaboration_modes else {}),
         )
         # Permission selection is intentionally NOT sent on thread/start or
         # thread/resume.
@@ -474,6 +478,7 @@ class CodexAppServerSession:
             method = "thread/start"
             params = {"cwd": self._cwd}
         result = self._client.request(method, params, timeout=15)
+        self._settings = {key: result.get(key) for key in ("model", "reasoningEffort", "collaborationMode")}
         # Cross-fill thread.id/sessionId — different codex versions have
         # serialized this under either key. Mirrors openclaw beta.8's
         # tolerance fix so future codex drops/renames don't KeyError us
@@ -524,6 +529,47 @@ class CodexAppServerSession:
 
     def __exit__(self, *exc: Any) -> None:
         self.close()
+
+    def read_settings(self) -> dict[str, Any]:
+        """Read effective settings, including changes made by another client."""
+        self.ensure_started()
+        assert self._client is not None
+        try:
+            self._settings = self._client.request(
+                "thread/resume", {"threadId": self._thread_id, "excludeTurns": True}, timeout=15,
+            )
+        except CodexAppServerError as exc:
+            # A freshly-created thread has no rollout until its first input.
+            if self._resume_thread_id or "no rollout found" not in exc.message:
+                raise
+        return self._settings
+
+    def set_collaboration_mode(self, mode: str) -> dict[str, Any]:
+        """Change subsequent turns without invoking a model or changing permissions."""
+        if mode not in {"plan", "default"}:
+            raise ValueError("Mode must be plan or default")
+        if not self._enable_collaboration_modes:
+            raise ValueError("Collaboration mode support was not enabled for this client")
+        settings = self.read_settings()
+        thread = settings.get("thread") or {}
+        if _in_progress_turn_id(thread) or (thread.get("status") or {}).get("type") == "active":
+            raise ValueError("任务正在运行，请先 !stop，再切换模式。")
+        current = settings.get("collaborationMode") or {}
+        current_settings = current.get("settings") or {}
+        model = current_settings.get("model") or settings.get("model")
+        if not model:
+            raise ValueError("Codex 未返回当前模型，无法安全切换模式。")
+        mode_settings = {"mode": mode, "settings": {
+            "model": model,
+            "reasoning_effort": current_settings.get("reasoning_effort", settings.get("reasoningEffort")),
+            "developer_instructions": None,
+        }}
+        assert self._client is not None
+        self._client.request("thread/settings/update", {
+            "threadId": self._thread_id, "collaborationMode": mode_settings,
+        }, timeout=15)
+        self._settings = {**settings, "collaborationMode": mode_settings}
+        return self._settings
 
     # ---------- interrupt ----------
 
@@ -590,6 +636,8 @@ class CodexAppServerSession:
         active_turn_id: Optional[str] = None
         if self._allow_active_turn_steer:
             active_turn_id = self._read_active_turn_id()
+        if self._interrupt_event.is_set():
+            return ""
         if active_turn_id:
             response = self._client.request(
                 "turn/steer",
@@ -641,6 +689,24 @@ class CodexAppServerSession:
         notification_poll_timeout: float = 0.25,
         post_tool_quiet_timeout: float = 90.0,
     ) -> TurnResult:
+        """Run one turn, honoring interrupts received while startup is pending."""
+        try:
+            if self._interrupt_event.is_set():
+                return TurnResult(interrupted=True, thread_id=self._thread_id)
+            return self._run_turn(user_input, turn_timeout=turn_timeout,
+                                  notification_poll_timeout=notification_poll_timeout,
+                                  post_tool_quiet_timeout=post_tool_quiet_timeout)
+        finally:
+            self._interrupt_event.clear()
+
+    def _run_turn(
+        self,
+        user_input: Any,
+        *,
+        turn_timeout: float = 600.0,
+        notification_poll_timeout: float = 0.25,
+        post_tool_quiet_timeout: float = 90.0,
+    ) -> TurnResult:
         """Send a user message and block until turn/completed, while
         forwarding server-initiated approval requests and projecting items
         into Hermes' messages shape.
@@ -670,7 +736,6 @@ class CodexAppServerSession:
         assert self._client is not None and self._thread_id is not None
         result.thread_id = self._thread_id
 
-        self._interrupt_event.clear()
         projector = CodexEventProjector()
 
         user_input_text = _coerce_turn_input_text(user_input)
