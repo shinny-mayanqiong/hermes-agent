@@ -94,6 +94,7 @@ class _Runtime:
     last_active: float = field(default_factory=time.monotonic)
     progress_ts: str = ""
     progress_updated_at: float = 0.0
+    progress_generation: int = 0
     progress_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     has_history: bool = True
 
@@ -477,7 +478,7 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
         if not resumed:
             await self._prune_runtimes(reserve_slot=True)
             if self._live_runtime_count() >= self.config.max_live_sessions:
-                raise ValueError("Codex session 数量已达上限，请先完成或停止一个 session。")
+                raise ValueError("Codex session 数量已达上限，请等待任务结束后再试。")
 
         # Prove that the app-server can start/resume before publishing a root.
         runtime = None
@@ -512,7 +513,7 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
                 f"*Codex session {'已恢复' if resumed else '已创建'}*",
                 f"ID: `{summary.thread_id}`",
                 f"目录: `{summary.cwd}`",
-                "直接在此 thread 回复即可继续；`!mode plan` / `!mode default` 切换模式，`!status` 查看状态。\n`!title [新标题]` 查看或修改标题；`!stop` 停止任务并暂停推送；`!resume` 恢复同步。",
+                "直接在此 thread 回复即可继续；`!mode plan` / `!mode default` 切换模式，`!status` 查看状态。\n`!title [新标题]` 查看或修改标题；`!stop` 暂停推送并清空排队消息，当前任务继续；`!resume` 恢复同步。",
             ]
         )
         try:
@@ -850,7 +851,7 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
         if self._live_runtime_count() >= self.config.max_live_sessions:
             await self._post_message(
                 runtime.binding.channel_id,
-                f"当前已有 {self.config.max_live_sessions} 个活动 Codex session，请先 `!stop` 一个。",
+                f"当前已有 {self.config.max_live_sessions} 个活动 Codex session，请等待任务结束后再试。",
                 thread_ts=runtime.binding.thread_ts,
             )
             return False
@@ -868,26 +869,30 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
         try:
             while runtime.queue and not runtime.stopping:
                 item = runtime.queue.popleft()
+                generation = runtime.progress_generation
                 # Let an already-running mirror delivery finish before this
                 # worker becomes the sole sender for the session.
                 lock = self._mirror_locks.setdefault(runtime.binding.codex_thread_id, asyncio.Lock())
                 async with lock:
                     pass
-                if runtime.stopping:
+                if runtime.stopping or not self._sync_enabled(runtime.binding) or generation != runtime.progress_generation:
                     break
                 if not await self._ensure_session(runtime):
                     runtime.queue.clear()
                     break
-                if runtime.stopping:
+                if runtime.stopping or not self._sync_enabled(runtime.binding) or generation != runtime.progress_generation:
                     break
-                response = await self._post_message(
-                    runtime.binding.channel_id,
-                    "⏳ Codex 正在处理…",
-                    thread_ts=runtime.binding.thread_ts,
-                )
-                runtime.progress_ts = str(response.get("ts") or "")
-                runtime.progress_updated_at = 0.0
-                if runtime.stopping:
+                async with runtime.progress_lock:
+                    if not self._sync_enabled(runtime.binding) or generation != runtime.progress_generation:
+                        break
+                    response = await self._post_message(
+                        runtime.binding.channel_id,
+                        "⏳ Codex 正在处理…",
+                        thread_ts=runtime.binding.thread_ts,
+                    )
+                    runtime.progress_ts = str(response.get("ts") or "")
+                    runtime.progress_updated_at = 0.0
+                if runtime.stopping or not self._sync_enabled(runtime.binding) or generation != runtime.progress_generation:
                     break
                 session = runtime.session
                 assert session is not None
@@ -900,27 +905,30 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
                 async with runtime.progress_lock:
                     # Serialize final status with any queued progress edit.
                     runtime.progress_updated_at = float("inf")
-                if result.error or result.interrupted:
-                    await self._edit_message(
-                        runtime.binding.channel_id,
-                        runtime.progress_ts,
-                        "⏹ Codex 已中断。" if result.interrupted else "⚠️ Codex turn 未完成。",
-                    )
-                    await self._post_message(
-                        runtime.binding.channel_id,
-                        result.error or "Codex 已中断。",
-                        thread_ts=runtime.binding.thread_ts,
-                    )
-                else:
-                    await self._edit_message(
-                        runtime.binding.channel_id,
-                        runtime.progress_ts,
-                        "✅ Codex 已完成。",
-                    )
-                    await self._send_final(runtime.binding, result.final_text or "Codex 已完成，但没有返回文本。")
-                if result.turn_id and self.config.shared_daemon:
-                    self.store.save_progress(runtime.binding.codex_thread_id, result.turn_id,
-                                             message_ts=runtime.progress_ts, completed=True)
+                    saved = (self.store.progress(runtime.binding.codex_thread_id, result.turn_id)
+                             if result.turn_id and self.config.shared_daemon else None)
+                    # Resume may already have skipped this completed turn while
+                    # the worker was waiting to deliver its result.
+                    if self._sync_enabled(runtime.binding) and not (saved and saved["completed"]):
+                        if result.error or result.interrupted:
+                            await self._edit_message(
+                                runtime.binding.channel_id,
+                                runtime.progress_ts,
+                                "⏹ Codex 已中断。" if result.interrupted else "⚠️ Codex turn 未完成。",
+                            )
+                            if self._sync_enabled(runtime.binding):
+                                await self._post_message(
+                                    runtime.binding.channel_id,
+                                    result.error or "Codex 已中断。",
+                                    thread_ts=runtime.binding.thread_ts,
+                                )
+                        else:
+                            await self._edit_message(runtime.binding.channel_id, runtime.progress_ts, "✅ Codex 已完成。")
+                            if self._sync_enabled(runtime.binding):
+                                await self._send_final(runtime.binding, result.final_text or "Codex 已完成，但没有返回文本。")
+                    if result.turn_id and self.config.shared_daemon:
+                        self.store.save_progress(runtime.binding.codex_thread_id, result.turn_id,
+                                                 message_ts=runtime.progress_ts, completed=True)
                 if result.should_retire:
                     await self._close_runtime(runtime)
         except Exception as exc:
@@ -930,12 +938,11 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
             runtime.queue.clear()
             async with runtime.progress_lock:
                 runtime.progress_updated_at = float("inf")
-                await self._edit_message(runtime.binding.channel_id, runtime.progress_ts, "⚠️ Codex 运行失败。")
-            await self._post_message(
-                runtime.binding.channel_id,
-                f"Codex 运行失败：{exc}",
-                thread_ts=runtime.binding.thread_ts,
-            )
+                if self._sync_enabled(runtime.binding):
+                    await self._edit_message(runtime.binding.channel_id, runtime.progress_ts, "⚠️ Codex 运行失败。")
+                if self._sync_enabled(runtime.binding):
+                    await self._post_message(runtime.binding.channel_id, f"Codex 运行失败：{exc}",
+                                             thread_ts=runtime.binding.thread_ts)
             await self._close_runtime(runtime)
         finally:
             runtime.active = False
@@ -971,15 +978,21 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
             return
         text = "⏳ " + turn_progress({"items": [item]})
         progress_ts = runtime.progress_ts
+        generation = runtime.progress_generation
+        if not self._sync_enabled(runtime.binding):
+            return
 
         def schedule() -> None:
-            asyncio.create_task(self._update_progress(runtime, text, progress_ts=progress_ts))
+            asyncio.create_task(self._update_progress(runtime, text, progress_ts=progress_ts, generation=generation))
 
         loop.call_soon_threadsafe(schedule)
 
-    async def _update_progress(self, runtime: _Runtime, text: str, *, progress_ts: str = "") -> None:
+    async def _update_progress(self, runtime: _Runtime, text: str, *, progress_ts: str = "",
+                               generation: Optional[int] = None) -> None:
         async with runtime.progress_lock:
             if not runtime.active or runtime.stopping or (progress_ts and progress_ts != runtime.progress_ts):
+                return
+            if not self._sync_enabled(runtime.binding) or (generation is not None and generation != runtime.progress_generation):
                 return
             now = time.monotonic()
             if now - runtime.progress_updated_at < 1.0:
@@ -1039,7 +1052,7 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
 
     async def _post_approval_locked(self, token: str, pending: _PendingApproval) -> None:
         current = self.store.by_codex(pending.binding.codex_thread_id)
-        if not current or current.sync_paused:
+        if not current or current.state != "active" or self._shutting_down:
             pending.event.set()
             return
         description = pending.description[:1500]

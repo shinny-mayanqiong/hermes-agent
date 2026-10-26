@@ -484,7 +484,7 @@ async def test_sessions_page_distinguishes_a_deleted_cwd_from_disallowed(plugin,
 
 
 @pytest.mark.asyncio
-async def test_bound_thread_turn_then_stop_releases_process_and_preserves_binding(plugin, tmp_path):
+async def test_bound_thread_turn_then_stop_preserves_connection_and_binding(plugin, tmp_path):
     FakeSession.instances.clear()
     manager = _manager(plugin, tmp_path)
     binding = _binding(plugin, manager)
@@ -499,12 +499,13 @@ async def test_bound_thread_turn_then_stop_releases_process_and_preserves_bindin
 
     await manager.stop(binding)
 
-    assert FakeSession.instances[-1].closed is True
+    assert FakeSession.instances[-1].closed is False
     persisted = manager.store.by_codex("codex-1")
     assert persisted is not None
     assert persisted.codex_thread_id == binding.codex_thread_id
     assert persisted.thread_ts == binding.thread_ts
-    assert binding.codex_thread_id not in manager._runtimes
+    assert manager._runtimes[binding.codex_thread_id] is runtime
+    assert persisted.sync_paused
     assert "已暂停自动推送" in manager.gateway.adapter.client.messages[-1]["text"]
     if manager._reaper:
         manager._reaper.cancel()
@@ -568,7 +569,7 @@ async def test_lru_keeps_capacity_but_evicts_to_reserve_new_slot(plugin, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_stop_denies_pending_approval_before_closing(plugin, tmp_path):
+async def test_stop_preserves_pending_approval_and_connection(plugin, tmp_path):
     manager = _manager(plugin, tmp_path)
     binding = _binding(plugin, manager)
     runtime = manager._runtime(binding)
@@ -578,23 +579,28 @@ async def test_stop_denies_pending_approval_before_closing(plugin, tmp_path):
 
     await manager.stop(binding)
 
-    assert pending.event.is_set()
-    assert pending.decision == "deny"
-    assert runtime.session is None
+    assert not pending.event.is_set()
+    assert runtime.session is not None
+    assert not runtime.session.closed
+    assert not runtime.session.interrupted
 
 
 @pytest.mark.asyncio
-async def test_slack_approval_button_unblocks_worker_callback(plugin, tmp_path):
+@pytest.mark.parametrize("paused", [False, True])
+async def test_slack_approval_button_unblocks_worker_callback(plugin, tmp_path, paused):
     manager = _manager(plugin, tmp_path)
     binding = _binding(plugin, manager)
+    if paused:
+        await manager.stop(binding)
     callback = manager._approval_callback(binding, asyncio.get_running_loop())
 
     task = asyncio.create_task(asyncio.to_thread(callback, "git status", "run command"))
     for _ in range(100):
-        if manager._approvals:
+        if any(pending.message_ts for pending in manager._approvals.values()):
             break
         await asyncio.sleep(0.01)
     token = next(iter(manager._approvals))
+    assert manager._approvals[token].message_ts
     await manager.handle_approval_action(
         plugin.ACTION_APPROVE_ONCE,
         {"channel": {"id": "C_HOME"}, "user": {"id": "U_OTHER"}, "team": {"id": "T1"}},
@@ -602,6 +608,7 @@ async def test_slack_approval_button_unblocks_worker_callback(plugin, tmp_path):
     )
 
     assert await task == "once"
+    assert manager.store.by_codex(binding.codex_thread_id).sync_paused == paused
 
 
 def test_register_exposes_command_hook_and_namespaced_actions(plugin):
@@ -749,7 +756,8 @@ async def test_status_and_stop_use_terminal_owned_turn_without_local_worker(plug
     assert "运行中" in manager.gateway.adapter.client.messages[-1]["text"]
     assert "正在运行测试" in manager.gateway.adapter.client.messages[-1]["text"]
     await manager.stop(binding)
-    assert manager.catalog.interrupts == [(binding.codex_thread_id, "terminal-active")]
+    assert manager.catalog.interrupts == []
+    assert manager.catalog.activity["turns"][0]["status"] == "inProgress"
 
 
 @pytest.mark.asyncio

@@ -99,11 +99,12 @@ since Slack does not support custom slash commands inside message threads.
 - `!mode plan` / `!mode default` — switch to Plan (planning) or Default
   (execution) through Codex's session settings API. The command itself does not
   start a task. It preserves the current model, reasoning effort, and permissions.
-  An active task must be stopped before switching; plain text such as
-  “执行模式” is a prompt and cannot change the mode.
-- `!stop` — pause automatic delivery, request interruption of the active turn,
-  clear queued messages, and release Hermes' connection. The pause survives
-  gateway restarts. The binding and Codex history remain intact.
+  Wait for the active task to finish, or interrupt it in the local Codex client
+  before switching; plain text such as “执行模式” is a prompt and cannot change the mode.
+- `!stop` — pause automatic progress and completion messages, and discard queued
+  inputs that have not started. The current Codex task and its connection stay
+  alive. Approval requests still appear and require an explicit decision.
+  The pause survives gateway restarts; the binding and Codex history remain intact.
 - `!resume` — explicitly restore automatic delivery. Completed history from
   the paused interval is skipped; current and future progress can be delivered.
   The session card's Resume button also restores delivery in its original thread.
@@ -111,22 +112,23 @@ since Slack does not support custom slash commands inside message threads.
 While paused, ordinary task messages are rejected with a `!resume` hint;
 `!title`, `!status`, and `!mode` remain available. Renaming or switching modes
 does not unpause delivery.
-For a running Plan session, use `!stop`, `!mode default`, `!resume`, then send
-the implementation task. Thread controls use `!` because custom Slack slash
-commands are not available inside threads; no new Slack app registration is needed.
+For a running Plan session, wait for completion or interrupt it in the local
+Codex client, then use `!mode default`. If delivery is paused, use `!resume`
+before sending the implementation task. Thread controls use `!` because custom
+Slack slash commands are not available inside threads; no new Slack app registration is needed.
 
 Mode controls require a Codex app-server supporting the experimental
 `thread/settings/update` API (verified with 0.163.0). Mode selection belongs to
 the Codex session, so local clients and Slack use the same setting. Unsupported
 servers report an error instead of sending a pretend mode-switching prompt.
 
-In shared-daemon mode `!stop` also interrupts a turn started from the terminal;
-it disconnects Hermes' client without stopping the shared daemon. A gateway
-shutdown disconnects its clients without interrupting daemon-owned work.
-Stopping one thread does not disable delivery for other bound sessions. An
+`!stop` does not interrupt tasks started from Slack or the terminal, and
+`!resume` does not start or replay a task. A gateway shutdown disconnects its
+clients without interrupting daemon-owned work.
+Pausing one thread does not disable delivery for other bound sessions. An
 already-started delivery is drained before the stop acknowledgement is posted.
-If the daemon is unavailable, delivery still pauses and the reply reports that
-task interruption could not be confirmed.
+Pausing delivery does not need a Codex connection and works while the daemon is
+unavailable. Resuming requires a successful state read to skip paused history.
 
 Codex only persists a new session after its first user message. Send the first
 prompt in the new Slack thread before restarting the daemon or gateway; the
@@ -142,7 +144,8 @@ plugin keeps the creating connection alive until that prompt arrives.
    an already bound session links to its existing Slack thread.
 4. Open that session using `codex agents` against the same local daemon and
    continue working. Slack receives subsequent progress and answers without
-   another Slack prompt; `!status` reads live state and `!stop` interrupts it.
+   another Slack prompt; `!status` reads live state and `!stop` pauses its delivery
+   while the task continues. Use `!resume` to restore delivery without a new turn.
 5. Restart only the Hermes gateway and verify that the binding and delivery
    checkpoint continue to work.
 

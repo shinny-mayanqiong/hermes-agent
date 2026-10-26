@@ -12,6 +12,11 @@ class SessionControls:
     def _control_lock(self, binding):
         return self._control_locks.setdefault(binding.codex_thread_id, asyncio.Lock())
 
+    def _sync_enabled(self, binding) -> bool:
+        current = self.store.by_codex(binding.codex_thread_id)
+        return bool(current and current.state == "active" and not current.sync_paused
+                    and not self._shutting_down)
+
     async def title(self, binding, argument: str = "") -> None:
         name = unescape(argument).strip()
         try:
@@ -36,7 +41,7 @@ class SessionControls:
         runtime = self._runtime(binding)
         if runtime.active or runtime.stopping:
             await self._post_message(binding.channel_id,
-                "任务正在运行，请先 `!stop`，再查看或切换模式。", thread_ts=binding.thread_ts)
+                "任务正在运行，请等待结束，或在本机 Codex 中中断后再查看或切换模式。", thread_ts=binding.thread_ts)
             return
         try:
             self._ensure_reaper()
@@ -92,8 +97,10 @@ class SessionControls:
             await self._post_message(binding.channel_id, "自动推送已开启。", thread_ts=binding.thread_ts)
             return True
         lock = self._mirror_locks.setdefault(binding.codex_thread_id, asyncio.Lock())
+        runtime = self._runtimes.get(binding.codex_thread_id)
+        progress_lock = runtime.progress_lock if runtime else asyncio.Lock()
         try:
-            async with lock:
+            async with lock, progress_lock:
                 # Advance to the latest turn instead of replaying paused history.
                 snapshot = (await asyncio.to_thread(self.catalog.read_activity, binding.codex_thread_id)
                             if self.config.shared_daemon else {})
@@ -104,6 +111,8 @@ class SessionControls:
                     self.store.save_progress(binding.codex_thread_id, latest["id"],
                                              completed=latest.get("status") != "inProgress")
                 self.store.pause_sync(binding, False)
+                if runtime and runtime.active:
+                    runtime.progress_updated_at = 0.0
         except Exception as exc:
             await self._post_message(binding.channel_id, f"恢复失败，自动推送仍暂停：{exc}",
                                      thread_ts=binding.thread_ts)
@@ -119,32 +128,10 @@ class SessionControls:
         runtime = self._runtimes.get(binding.codex_thread_id)
         dropped = len(runtime.queue) if runtime else 0
         if runtime:
-            runtime.stopping = True
             runtime.queue.clear()
-            if runtime.session:
-                runtime.session.request_interrupt()
-        self._deny_pending_approvals(binding)
-        error = ""
-        if self.config.shared_daemon:
-            try:
-                snapshot = await asyncio.to_thread(self.catalog.read_activity, binding.codex_thread_id)
-                for turn in reversed(snapshot.get("turns") or []):
-                    if turn.get("status") == "inProgress":
-                        await asyncio.to_thread(self.catalog.interrupt_turn, binding.codex_thread_id, turn["id"])
-                        break
-            except Exception as exc:
-                error = f"\n无法确认 Codex 已停止：{exc}"
-        if runtime:
-            worker = runtime.worker
-            if worker and worker is not asyncio.current_task():
-                try:
-                    await asyncio.wait_for(asyncio.shield(worker), timeout=10)
-                except asyncio.TimeoutError:
-                    await self._close_runtime(runtime)
-                    worker.cancel()
-                    await asyncio.gather(worker, return_exceptions=True)
-            await self._close_runtime(runtime)
-            self._runtimes.pop(binding.codex_thread_id, None)
+            # Invalidate queued progress edits and inputs not yet submitted.
+            # The running worker and its approval connection stay alive.
+            runtime.progress_generation += 1
             async with runtime.progress_lock:
                 pass
         # Drain any already-started delivery before acknowledging the stop.
@@ -153,6 +140,6 @@ class SessionControls:
             pass
         suffix = f"，清空 {dropped} 条排队消息" if dropped else ""
         await self._post_message(binding.channel_id,
-            f"已暂停自动推送并释放连接{suffix}；已请求中断当前任务。{error}\n"
-            "暂停状态会在重启后保留。使用 `!resume` 恢复同步，再发送任务。",
+            f"已暂停自动推送{suffix}；当前 Codex 任务继续运行，审批请求仍会显示。\n"
+            "暂停状态会在重启后保留。使用 `!resume` 恢复同步后再发送新任务。",
             thread_ts=binding.thread_ts)

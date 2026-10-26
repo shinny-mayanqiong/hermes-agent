@@ -27,6 +27,7 @@ class Daemon:
         self.modes = {}
         self.turn_modes = []
         self.think_after_tool = 0.0
+        self.finish_turn = None
 
     def handle(self, ws):
         for raw in ws:
@@ -93,6 +94,8 @@ class Daemon:
                                 "params": {**note, "command": "git status", "cwd": thread["cwd"]}}))
             approval = json.loads(ws.recv(timeout=10))
             self.approvals.append(approval)
+            if self.finish_turn is not None:
+                assert self.finish_turn.wait(10)
             ws.send(json.dumps({"method": "item/completed", "params": {
                 **note, "item": {"type": "commandExecution", "id": "exec", "command": "git status",
                                  "status": "completed", "exitCode": 0},
@@ -127,8 +130,8 @@ async def eventually(predicate):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("think_after_tool", [False, True])
-async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_path, monkeypatch, think_after_tool):
+@pytest.mark.parametrize("think_after_tool,pause_delivery", [(False, False), (True, False), (False, True)])
+async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_path, monkeypatch, think_after_tool, pause_delivery):
     import hermes_cli.plugins as plugins
     from gateway.config import HomeChannel, Platform, PlatformConfig
     from gateway.run import GatewayRunner
@@ -136,6 +139,8 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
 
     socket_path = str(tmp_path / "rpc.sock")
     daemon = Daemon()
+    if pause_delivery:
+        daemon.finish_turn = threading.Event()
     if think_after_tool:
         from agent.transports.codex_app_server_session import CodexAppServerSession
         run_turn = CodexAppServerSession.run_turn
@@ -229,16 +234,37 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
             })
             await eventually(lambda: manager._approvals)
             token = next(iter(manager._approvals))
+            if pause_delivery:
+                for message in ("queued B", "queued C"):
+                    await thread_command(message)
+                await thread_command("!stop")
+                runtime = manager._runtimes["thread-1"]
+                assert runtime.active and not runtime.queue
+                assert not manager._approvals[token].event.is_set()
+                assert daemon.threads["thread-1"]["status"]["type"] == "active"
+                await thread_command("not accepted D")
+                assert "!resume" in api.messages[-1]["text"]
             await manager.handle_approval_action(module.ACTION_APPROVE_ONCE,
                 {"channel": {"id": "C_HOME"}, "user": {"id": "U_ME"}, "team": {"id": "T1"}},
                 {"value": token})
+            if pause_delivery:
+                before_delivery = (len(api.messages), len(api.updates))
+                daemon.finish_turn.set()
             await eventually(lambda: manager.store.progress("thread-1", "turn-1"))
             assert daemon.prompts == ["do the work"]  # No Slack transcript injection.
             assert daemon.turn_modes == ["default"]
             assert not any(method == "turn/interrupt" for method, _ in daemon.requests)
             assert daemon.approvals[0]["result"] == {"decision": "accept"}
-            assert any(message["text"] == "wire answer" and message.get("thread_ts") == binding.thread_ts
-                       for message in api.messages)
+            if pause_delivery:
+                assert (len(api.messages), len(api.updates)) == before_delivery
+                assert daemon.threads["thread-1"]["turns"][0]["status"] == "completed"
+                await thread_command("!resume")
+                await manager._sync_binding(binding)
+                assert not any(message["text"] == "wire answer" for message in api.messages)
+                assert daemon.prompts == ["do the work"]
+            else:
+                assert any(message["text"] == "wire answer" and message.get("thread_ts") == binding.thread_ts
+                           for message in api.messages)
 
             await gateway._handle_message(_event("/codex resume thread-1"))
             await asyncio.gather(*manager._handlers)
@@ -319,6 +345,8 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
             assert not any(method == "thread/delete" for method, _ in daemon.requests)
             assert daemon.prompts == ["do the work"]
         finally:
+            if daemon.finish_turn is not None:
+                daemon.finish_turn.set()
             await plugins.invoke_hook_async("on_gateway_stop", gateway=gateway)
             server.shutdown()
             server_thread.join(timeout=5)

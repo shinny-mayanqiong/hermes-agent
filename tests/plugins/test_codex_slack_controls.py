@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 
 from tests.plugins.test_codex_slack_plugin import (
-    plugin, _manager, _binding, _event, _activity, _summary,
+    plugin, _manager, _binding, _event, _activity, _summary, FakeSession, TurnResult,
 )
 
 
@@ -71,7 +71,8 @@ async def test_stop_is_durable_and_resume_discards_paused_history(plugin, tmp_pa
     await manager._sync_binding(binding)
     await manager.handle_event(_event("!stop", thread_id=binding.thread_ts))
     assert manager.store.by_codex(binding.codex_thread_id).sync_paused
-    assert manager.catalog.interrupts == [(binding.codex_thread_id, "old")]
+    assert manager.catalog.interrupts == []
+    assert manager.catalog.activity["turns"][0]["status"] == "inProgress"
     assert not manager.store.in_channel(binding.channel_id)
 
     restarted = _manager(plugin, tmp_path)
@@ -157,7 +158,7 @@ async def test_stop_still_pauses_if_daemon_is_unavailable(plugin, tmp_path):
     manager.catalog.read_activity = fail
     await manager.stop(binding)
     assert manager.store.by_codex(binding.codex_thread_id).sync_paused
-    assert "无法确认 Codex 已停止" in manager.gateway.adapter.client.messages[-1]["text"]
+    assert "当前 Codex 任务继续运行" in manager.gateway.adapter.client.messages[-1]["text"]
     await manager.resume_sync(binding)
     assert manager.store.by_codex(binding.codex_thread_id).sync_paused
     assert "恢复失败" in manager.gateway.adapter.client.messages[-1]["text"]
@@ -189,9 +190,186 @@ async def test_mode_switch_refuses_active_worker(plugin, tmp_path):
     runtime = manager._runtime(binding)
     runtime.active = True
     await manager.mode(binding, "default")
-    assert "先 `!stop`" in manager.gateway.adapter.client.messages[-1]["text"]
+    assert "等待结束" in manager.gateway.adapter.client.messages[-1]["text"]
     assert runtime.session is None
     runtime.active = False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["completed", "failed", "exception"])
+@pytest.mark.parametrize("resume_running", [False, True])
+async def test_stop_clears_queue_keeps_running_turn_and_gates_delivery(plugin, tmp_path, outcome, resume_running):
+    manager = _manager(plugin, tmp_path)
+    manager.config = replace(manager.config, shared_daemon=True)
+    binding = _binding(plugin, manager)
+    manager.catalog.activity = _activity("running", "working")
+    entered, release = threading.Event(), threading.Event()
+    prompts = []
+
+    class RunningSession(FakeSession):
+        def run_turn(self, text):
+            prompts.append(text)
+            entered.set()
+            assert release.wait(5)
+            if outcome == "exception":
+                raise RuntimeError("failed in background")
+            return TurnResult(thread_id=binding.codex_thread_id, turn_id="running",
+                              final_text="finished in background",
+                              error="failed in background" if outcome == "failed" else None)
+
+    manager.session_factory = RunningSession
+    await manager.handle_event(_event("A", thread_id=binding.thread_ts))
+    runtime = manager._runtimes[binding.codex_thread_id]
+    worker = runtime.worker
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        session = runtime.session
+        for message in ("B", "C"):
+            await manager.handle_event(_event(message, thread_id=binding.thread_ts))
+        generation = runtime.progress_generation
+        await manager.handle_event(_event("!stop", thread_id=binding.thread_ts))
+        assert "清空 2 条排队消息" in manager.gateway.adapter.client.messages[-1]["text"]
+        assert not runtime.queue
+        assert runtime.active and not worker.done()
+        assert not runtime.stopping and not session.interrupted and not session.closed
+        assert manager.catalog.interrupts == []
+        await manager.handle_event(_event("D", thread_id=binding.thread_ts))
+        assert "!resume" in manager.gateway.adapter.client.messages[-1]["text"]
+        updates = len(manager.gateway.adapter.client.updates)
+        await manager._update_progress(runtime, "suppressed")
+        assert len(manager.gateway.adapter.client.updates) == updates
+
+        if resume_running:
+            await manager.handle_event(_event("!resume", thread_id=binding.thread_ts))
+            await manager._update_progress(runtime, "stale", generation=generation)
+            assert len(manager.gateway.adapter.client.updates) == updates
+            await manager._update_progress(runtime, "live")
+            assert manager.gateway.adapter.client.updates[-1]["text"] == "live"
+        count = len(manager.gateway.adapter.client.messages)
+        release.set()
+        await worker
+        assert prompts == ["A"]
+        if resume_running:
+            if outcome == "completed":
+                assert manager.gateway.adapter.sent[-1]["text"] == "finished in background"
+            else:
+                assert "failed in background" in manager.gateway.adapter.client.messages[-1]["text"]
+        else:
+            assert len(manager.gateway.adapter.client.updates) == updates
+            assert len(manager.gateway.adapter.client.messages) == count
+            assert not manager.gateway.adapter.sent
+            manager.catalog.activity = _activity("running", "finished in background", "completed")
+            await manager.handle_event(_event("!resume", thread_id=binding.thread_ts))
+            await manager._sync_binding(binding)
+            assert not manager.gateway.adapter.sent
+        assert not runtime.queue
+    finally:
+        release.set()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_stop_discards_input_popped_before_session_start_even_after_resume(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+    entered, release = asyncio.Event(), asyncio.Event()
+    ensure_session = manager._ensure_session
+
+    async def slow_start(runtime):
+        entered.set()
+        await release.wait()
+        return await ensure_session(runtime)
+
+    manager._ensure_session = slow_start
+    await manager.enqueue_turn(binding, "not started", "U_ME")
+    runtime = manager._runtimes[binding.codex_thread_id]
+    worker = runtime.worker
+    try:
+        await entered.wait()
+        await manager.handle_event(_event("!stop", thread_id=binding.thread_ts))
+        await manager.handle_event(_event("!resume", thread_id=binding.thread_ts))
+        release.set()
+        await worker
+        assert not manager.gateway.adapter.sent
+        assert not manager.gateway.adapter.client.updates
+        assert not runtime.active
+    finally:
+        release.set()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_worker_final_status_then_suppresses_answer(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+    entered, release = asyncio.Event(), asyncio.Event()
+    edit = manager._edit_message
+
+    async def slow_edit(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await edit(*args, **kwargs)
+
+    manager._edit_message = slow_edit
+    await manager.enqueue_turn(binding, "work", "U_ME")
+    runtime = manager._runtimes[binding.codex_thread_id]
+    worker = runtime.worker
+    stop = None
+    try:
+        await entered.wait()
+        stop = asyncio.create_task(manager.stop(binding))
+        await asyncio.sleep(0)
+        assert manager.store.by_codex(binding.codex_thread_id).sync_paused
+        assert not stop.done()
+        release.set()
+        await asyncio.gather(worker, stop)
+        assert "已暂停" in manager.gateway.adapter.client.messages[-1]["text"]
+        assert not manager.gateway.adapter.sent
+    finally:
+        release.set()
+        await asyncio.gather(worker, *([stop] if stop else []), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_resume_skips_completed_turn_whose_worker_result_is_pending(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    manager.config = replace(manager.config, shared_daemon=True)
+    binding = _binding(plugin, manager)
+    entered, release = threading.Event(), threading.Event()
+    reading, finish_read = threading.Event(), threading.Event()
+
+    class RunningSession(FakeSession):
+        def run_turn(self, text):
+            entered.set()
+            assert release.wait(5)
+            return TurnResult(thread_id=binding.codex_thread_id, turn_id="done", final_text="old result")
+
+    def read(*args, **kwargs):
+        reading.set()
+        assert finish_read.wait(5)
+        return _activity("done", "old result", "completed")
+
+    manager.session_factory = RunningSession
+    manager.catalog.read_activity = read
+    await manager.enqueue_turn(binding, "work", "U_ME")
+    runtime = manager._runtimes[binding.codex_thread_id]
+    worker = runtime.worker
+    resume = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        await manager.stop(binding)
+        resume = asyncio.create_task(manager.resume_sync(binding))
+        assert await asyncio.to_thread(reading.wait, 5)
+        release.set()  # Worker finishes while Resume owns the delivery lock.
+        finish_read.set()
+        await asyncio.gather(worker, resume)
+        assert not manager.gateway.adapter.sent
+        assert not manager.gateway.adapter.client.updates
+        assert manager.store.progress(binding.codex_thread_id, "done")["completed"]
+    finally:
+        release.set()
+        finish_read.set()
+        await asyncio.gather(worker, *([resume] if resume else []), return_exceptions=True)
 
 
 @pytest.mark.asyncio

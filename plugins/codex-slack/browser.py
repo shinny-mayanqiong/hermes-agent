@@ -135,7 +135,7 @@ class SessionBrowser:
             async with lock:
                 runtime = self._runtimes.get(thread_id)
                 if runtime and (runtime.active or runtime.queue):
-                    raise ValueError("该会话正在运行，请先在原 thread 中 !stop，再执行此操作。")
+                    raise ValueError("该会话正在运行，请等待结束，或在本机 Codex 中停止后再归档。")
                 summary = await asyncio.to_thread(self.catalog.read_thread, thread_id)
                 if not self._cwd_allowed(summary.cwd):
                     raise ValueError("该会话不在允许的项目路径范围内。")
