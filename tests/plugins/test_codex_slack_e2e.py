@@ -26,6 +26,7 @@ class Daemon:
         self.approvals = []
         self.modes = {}
         self.turn_modes = []
+        self.think_after_tool = 0.0
 
     def handle(self, ws):
         for raw in ws:
@@ -92,6 +93,17 @@ class Daemon:
                                 "params": {**note, "command": "git status", "cwd": thread["cwd"]}}))
             approval = json.loads(ws.recv(timeout=10))
             self.approvals.append(approval)
+            ws.send(json.dumps({"method": "item/completed", "params": {
+                **note, "item": {"type": "commandExecution", "id": "exec", "command": "git status",
+                                 "status": "completed", "exitCode": 0},
+            }}))
+            if self.think_after_tool:
+                # Reasoning has no transcript projection but proves the turn is
+                # alive. Finish later than the test's short post-tool deadline.
+                ws.send(json.dumps({"method": "item/completed", "params": {
+                    **note, "item": {"type": "reasoning", "id": "think", "summary": []},
+                }}))
+                time.sleep(self.think_after_tool)
             turn.update(status="completed", completedAt=int(time.time()), items=[{
                 "type": "agentMessage", "id": "answer", "text": "wire answer", "phase": "final_answer",
             }])
@@ -115,7 +127,8 @@ async def eventually(predicate):
 
 
 @pytest.mark.asyncio
-async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_path, monkeypatch):
+@pytest.mark.parametrize("think_after_tool", [False, True])
+async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_path, monkeypatch, think_after_tool):
     import hermes_cli.plugins as plugins
     from gateway.config import HomeChannel, Platform, PlatformConfig
     from gateway.run import GatewayRunner
@@ -123,6 +136,16 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
 
     socket_path = str(tmp_path / "rpc.sock")
     daemon = Daemon()
+    if think_after_tool:
+        from agent.transports.codex_app_server_session import CodexAppServerSession
+        run_turn = CodexAppServerSession.run_turn
+
+        def short_watchdog(self, *args, **kwargs):
+            return run_turn(self, *args, **kwargs, post_tool_quiet_timeout=0.05,
+                            notification_poll_timeout=0.01)
+
+        monkeypatch.setattr(CodexAppServerSession, "run_turn", short_watchdog)
+        daemon.think_after_tool = 0.3
     home = tmp_path / "hermes"
     home.mkdir()
     repo = tmp_path / "repo"
@@ -212,6 +235,7 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
             await eventually(lambda: manager.store.progress("thread-1", "turn-1"))
             assert daemon.prompts == ["do the work"]  # No Slack transcript injection.
             assert daemon.turn_modes == ["default"]
+            assert not any(method == "turn/interrupt" for method, _ in daemon.requests)
             assert daemon.approvals[0]["result"] == {"decision": "accept"}
             assert any(message["text"] == "wire answer" and message.get("thread_ts") == binding.thread_ts
                        for message in api.messages)

@@ -778,11 +778,23 @@ class CodexAppServerSession:
         result.turn_id = submitted_turn_id or None
         deadline = time.monotonic() + turn_timeout
         turn_complete = False
-        # Post-tool watchdog state. last_tool_completion_at is set whenever
-        # a tool-shaped item completes; if no further notification arrives
-        # within post_tool_quiet_timeout and the turn hasn't completed, we
-        # fast-fail and retire the session.
+        # Watch protocol activity, not just materialized transcript messages:
+        # reasoning, streaming deltas and running tools may produce no projection.
         last_tool_completion_at: Optional[float] = None
+        active_items: set[str] = set()
+
+        def observe_activity(note: dict, *, tool_completed: bool) -> None:
+            nonlocal last_tool_completion_at
+            method = note.get("method", "")
+            item_id = ((note.get("params") or {}).get("item") or {}).get("id")
+            if method == "item/started" and item_id:
+                active_items.add(item_id)
+            elif method == "item/completed" and item_id:
+                active_items.discard(item_id)
+            if tool_completed:
+                last_tool_completion_at = time.monotonic()
+            elif method.startswith("item/") or method in {"turn/plan/updated", "turn/diff/updated"}:
+                last_tool_completion_at = None
 
         def belongs_to_turn(message: dict) -> bool:
             params = message.get("params") or {}
@@ -812,24 +824,6 @@ class CodexAppServerSession:
                         "codex app-server subprocess exited unexpectedly",
                         tail_lines=20,
                     )
-                result.should_retire = True
-                break
-
-            # Post-tool watchdog: if a tool completion was the most recent
-            # signal and codex has been silent past the quiet timeout, give
-            # up on this turn instead of waiting for the outer deadline.
-            if (
-                last_tool_completion_at is not None
-                and (time.monotonic() - last_tool_completion_at)
-                    > post_tool_quiet_timeout
-            ):
-                self._issue_interrupt(result.turn_id)
-                result.interrupted = True
-                result.error = (
-                    f"codex went silent for "
-                    f"{post_tool_quiet_timeout:.0f}s after a tool result; "
-                    f"retiring app-server session."
-                )
                 result.should_retire = True
                 break
 
@@ -865,11 +859,11 @@ class CodexAppServerSession:
                     _apply_token_usage_notification(result, pending)
                     self._track_pending_file_change(pending)
                     proj = projector.project(pending)
+                    observe_activity(pending, tool_completed=proj.is_tool_iteration)
                     if proj.messages:
                         result.projected_messages.extend(proj.messages)
                     if proj.is_tool_iteration:
                         result.tool_iterations += 1
-                        last_tool_completion_at = time.monotonic()
                     if proj.final_text is not None:
                         result.final_text = proj.final_text
                         if _has_turn_aborted_marker(proj.final_text):
@@ -889,6 +883,19 @@ class CodexAppServerSession:
                 timeout=notification_poll_timeout
             )
             if note is None:
+                # Drain queued events/requests before declaring silence. A
+                # completed parallel tool must not time out another live item.
+                if (last_tool_completion_at is not None and not active_items
+                        and time.monotonic() - last_tool_completion_at > post_tool_quiet_timeout):
+                    self._issue_interrupt(result.turn_id)
+                    result.interrupted = True
+                    result.error = (
+                        f"codex went silent for "
+                        f"{post_tool_quiet_timeout:.0f}s after a tool result; "
+                        f"retiring app-server session."
+                    )
+                    result.should_retire = True
+                    break
                 continue
             if not belongs_to_turn(note):
                 continue
@@ -910,19 +917,11 @@ class CodexAppServerSession:
 
             # Project into messages
             projection = projector.project(note)
+            observe_activity(note, tool_completed=projection.is_tool_iteration)
             if projection.messages:
                 result.projected_messages.extend(projection.messages)
             if projection.is_tool_iteration:
                 result.tool_iterations += 1
-                # Arm/refresh the post-tool quiet watchdog whenever a
-                # tool-shaped item completes.
-                last_tool_completion_at = time.monotonic()
-            else:
-                # Any non-tool projected activity (assistant message,
-                # status update, etc.) means codex is still producing
-                # output — clear the quiet timer so we don't fast-fail.
-                if projection.messages or projection.final_text is not None:
-                    last_tool_completion_at = None
             if projection.final_text is not None:
                 # Codex can emit multiple agentMessage items in one turn
                 # (e.g. partial then final). Take the last one as canonical.

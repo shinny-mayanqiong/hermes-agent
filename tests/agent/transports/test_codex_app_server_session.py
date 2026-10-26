@@ -1023,6 +1023,96 @@ class TestSessionRetirement:
         assert r.should_retire is False
         assert r.interrupted is False
 
+    @pytest.mark.parametrize("method,params", [
+        ("item/completed", {"item": {"type": "reasoning", "id": "r1", "summary": []}}),
+        ("item/started", {"item": {"type": "commandExecution", "id": "long-tool"}}),
+        ("item/reasoning/textDelta", {"itemId": "r1", "delta": "working"}),
+        ("item/agentMessage/delta", {"itemId": "m1", "delta": "working"}),
+        ("item/commandExecution/outputDelta", {"itemId": "long-tool", "delta": "working"}),
+        ("item/mcpToolCall/progress", {"itemId": "mcp1", "message": "working"}),
+        ("turn/plan/updated", {"plan": []}),
+    ])
+    def test_post_tool_watchdog_observes_unprojected_activity(self, method, params):
+        """Replay the report: tool result, reasoning at +17s, then >90s."""
+        client = FakeClient()
+        scope = {"threadId": "thread-fake-001", "turnId": "turn-fake-001"}
+        clock = [0.0]
+        events = iter([
+            (0.0, {"method": "item/completed", "params": {**scope, "item": {
+                "type": "commandExecution", "id": "tool", "exitCode": 0}}}),
+            (17.0, {"method": method, "params": {**scope, **params}}),
+            (91.0, None),
+            (100.0, {"method": "turn/completed", "params": {**scope, "turn": {
+                "id": scope["turnId"], "status": "completed"}}}),
+        ])
+
+        def poll(timeout=0):
+            clock[0], note = next(events)
+            return note
+
+        client.take_notification = poll
+        with patch.object(session_mod.time, "monotonic", side_effect=lambda: clock[0]):
+            result = make_session(client).run_turn("continue")
+        assert not result.interrupted
+        assert not result.should_retire
+        assert result.error is None
+        assert not any(method == "turn/interrupt" for method, _ in client.requests)
+
+    def test_post_tool_watchdog_waits_for_parallel_item_to_finish(self):
+        client = FakeClient()
+        scope = {"threadId": "thread-fake-001", "turnId": "turn-fake-001"}
+        clock = [0.0]
+        events = iter([
+            (0.0, {"method": "item/started", "params": {**scope, "item": {
+                "type": "commandExecution", "id": "long-tool"}}}),
+            (1.0, {"method": "item/completed", "params": {**scope, "item": {
+                "type": "commandExecution", "id": "short-tool", "exitCode": 0}}}),
+            (100.0, None),
+            (101.0, {"method": "item/completed", "params": {**scope, "item": {
+                "type": "commandExecution", "id": "long-tool", "exitCode": 0}}}),
+            (102.0, {"method": "turn/completed", "params": {**scope, "turn": {
+                "id": scope["turnId"], "status": "completed"}}}),
+        ])
+
+        def poll(timeout=0):
+            clock[0], note = next(events)
+            return note
+
+        client.take_notification = poll
+        with patch.object(session_mod.time, "monotonic", side_effect=lambda: clock[0]):
+            result = make_session(client).run_turn("parallel work")
+        assert result.tool_iterations == 2
+        assert not result.interrupted
+        assert not any(method == "turn/interrupt" for method, _ in client.requests)
+
+    @pytest.mark.parametrize("method,scope", [
+        ("item/started", {"threadId": "other-thread", "turnId": "turn-fake-001"}),
+        ("item/started", {"threadId": "thread-fake-001", "turnId": "other-turn"}),
+        ("thread/tokenUsage/updated", {"threadId": "thread-fake-001"}),
+    ])
+    def test_post_tool_watchdog_ignores_unrelated_or_accounting_events(self, method, scope):
+        client = FakeClient()
+        clock = [0.0]
+        events = iter([
+            (0.0, {"method": "item/completed", "params": {
+                "threadId": "thread-fake-001", "turnId": "turn-fake-001",
+                "item": {"type": "commandExecution", "id": "tool", "exitCode": 0}}}),
+            (17.0, {"method": method, "params": {**scope, "item": {
+                "type": "commandExecution", "id": "unrelated"}}}),
+            (91.0, None),
+        ])
+
+        def poll(timeout=0):
+            clock[0], note = next(events)
+            return note
+
+        client.take_notification = poll
+        with patch.object(session_mod.time, "monotonic", side_effect=lambda: clock[0]):
+            result = make_session(client).run_turn("truly stalled")
+        assert result.interrupted and result.should_retire
+        assert "silent" in result.error
+        assert ("turn/interrupt", {"threadId": "thread-fake-001", "turnId": "turn-fake-001"}) in client.requests
+
     def test_turn_aborted_marker_in_text_is_terminal(self):
         """If codex emits `<turn_aborted>` in agent text and never sends
         turn/completed, we still exit promptly instead of burning the
