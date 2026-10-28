@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
+from html import escape
 import json
 import logging
 import os
@@ -460,6 +461,7 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
         user_id: str,
         resumed: bool,
     ) -> Binding:
+        title = escape(summary.title, quote=False)
         existing = self.store.by_codex(summary.thread_id)
         if existing:
             link = await self._permalink(existing)
@@ -471,7 +473,7 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
                 await self._post_ephemeral(
                     channel_id,
                     user_id,
-                    f"该 Codex session 已绑定：<{link}|打开原 thread>",
+                    f"该 Codex session 【{title}】已绑定：<{link}|打开原 thread>",
                 )
                 return existing
 
@@ -510,9 +512,7 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
 
         root_text = "\n".join(
             [
-                f"*Codex session {'已恢复' if resumed else '已创建'}*",
-                f"ID: `{summary.thread_id}`",
-                f"目录: `{summary.cwd}`",
+                f"*Codex session 【{title}】{'已恢复' if resumed else '已创建'}*",
                 "直接在此 thread 回复即可继续；`!mode plan` / `!mode default` 切换模式，`!status` 查看状态。\n`!title [新标题]` 查看或修改标题；`!stop` 暂停推送并清空排队消息，当前任务继续；`!resume` 恢复同步。",
             ]
         )

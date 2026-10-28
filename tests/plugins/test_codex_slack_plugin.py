@@ -400,7 +400,10 @@ async def test_new_creates_codex_then_root_and_persists_binding(plugin, tmp_path
     assert binding is not None
     assert binding.cwd == manager.config.default_cwd
     assert manager.gateway.adapter.client.messages[0]["channel"] == "C_HOME"
-    assert "Codex session 已创建" in manager.gateway.adapter.client.messages[0]["text"]
+    root_text = manager.gateway.adapter.client.messages[0]["text"]
+    assert "Codex session 【New Codex session】已创建" in root_text
+    assert binding.codex_thread_id not in root_text
+    assert binding.cwd not in root_text
     assert FakeSession.instances[0].closed is False
     await manager.enqueue_turn(binding, "first prompt", "U_ME")
     await manager._runtimes[binding.codex_thread_id].worker
@@ -411,7 +414,7 @@ async def test_new_creates_codex_then_root_and_persists_binding(plugin, tmp_path
 
 @pytest.mark.asyncio
 async def test_resume_reuses_existing_binding_instead_of_duplicating(plugin, tmp_path):
-    thread = _summary(cwd=tmp_path / "project")
+    thread = _summary(cwd=tmp_path / "project", title="蓝山 & <期货持仓>")
     manager = _manager(plugin, tmp_path, threads=[thread])
     binding = _binding(plugin, manager)
 
@@ -422,6 +425,7 @@ async def test_resume_reuses_existing_binding_instead_of_duplicating(plugin, tmp
     assert persisted.codex_thread_id == binding.codex_thread_id
     assert persisted.thread_ts == binding.thread_ts
     assert not manager.gateway.adapter.client.messages
+    assert "该 Codex session 【蓝山 &amp; &lt;期货持仓&gt;】已绑定" in manager.gateway.adapter.client.ephemeral[-1]["text"]
     assert "打开原 thread" in manager.gateway.adapter.client.ephemeral[-1]["text"]
 
 
@@ -430,7 +434,8 @@ async def test_resume_can_replace_a_missing_original_cwd(plugin, tmp_path):
     missing = tmp_path / "deleted-worktree"
     replacement = tmp_path / "team" / "replacement"
     replacement.mkdir(parents=True)
-    manager = _manager(plugin, tmp_path, threads=[_summary(cwd=missing)])
+    thread = _summary(cwd=missing, title="蓝山方案期货持仓")
+    manager = _manager(plugin, tmp_path, threads=[thread])
 
     await manager.handle_command(
         _event("/codex resume codex-1 team/replacement")
@@ -440,6 +445,10 @@ async def test_resume_can_replace_a_missing_original_cwd(plugin, tmp_path):
     assert binding is not None
     assert binding.cwd == str(replacement.resolve())
     assert FakeSession.instances[-1].cwd == str(replacement.resolve())
+    root_text = manager.gateway.adapter.client.messages[0]["text"]
+    assert f"Codex session 【{thread.title}】已恢复" in root_text
+    assert binding.codex_thread_id not in root_text
+    assert binding.cwd not in root_text
 
 
 @pytest.mark.asyncio
