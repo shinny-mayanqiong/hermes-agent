@@ -250,7 +250,7 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
             if pause_delivery:
                 before_delivery = (len(api.messages), len(api.updates))
                 daemon.finish_turn.set()
-            await eventually(lambda: manager.store.progress("thread-1", "turn-1"))
+            await eventually(lambda: (manager.store.progress("thread-1", "turn-1") or {}).get("completed"))
             assert daemon.prompts == ["do the work"]  # No Slack transcript injection.
             assert daemon.turn_modes == ["default"]
             assert not any(method == "turn/interrupt" for method, _ in daemon.requests)
@@ -263,8 +263,11 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
                 assert not any(message["text"] == "wire answer" for message in api.messages)
                 assert daemon.prompts == ["do the work"]
             else:
-                assert any(message["text"] == "wire answer" and message.get("thread_ts") == binding.thread_ts
-                           for message in api.messages)
+                results = [message for message in api.messages if "wire answer" in message["text"]]
+                assert len(results) == 1
+                assert results[0]["text"] == "wire answer"
+                assert results[0]["thread_ts"] == binding.thread_ts
+                assert results[0]["ts"] == manager._runtimes["thread-1"].progress_ts
 
             await gateway._handle_message(_event("/codex resume thread-1"))
             await asyncio.gather(*manager._handlers)
@@ -285,7 +288,7 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
             manager = module._manager()
             await eventually(lambda: any(message["text"] == "terminal finished" for message in api.messages))
             await manager._sync_binding(binding)
-            assert sum(message["text"] == "terminal finished" for message in api.messages) == 1
+            assert sum("terminal finished" in message["text"] for message in api.messages) == 1
             assert daemon.prompts == ["do the work"]
 
             await adapter._handle_slack_message({

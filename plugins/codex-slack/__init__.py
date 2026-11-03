@@ -311,13 +311,14 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
         *,
         thread_ts: str = "",
         blocks: Optional[list[dict[str, Any]]] = None,
+        formatted: bool = False,
     ) -> dict[str, Any]:
         adapter = self._adapter()
         client = self._client(adapter, channel_id)
         if client is None:
             raise RuntimeError("Slack client is not available")
         formatter = getattr(adapter, "format_message", None)
-        rendered = formatter(text) if callable(formatter) else text
+        rendered = formatter(text) if callable(formatter) and not formatted else text
         kwargs: dict[str, Any] = {
             "channel": channel_id,
             "text": rendered,
@@ -364,7 +365,8 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
             kwargs["thread_ts"] = thread_ts
         return _slack_data(await client.chat_postEphemeral(**kwargs))
 
-    async def _edit_message(self, channel_id: str, message_ts: str, text: str, *, strict: bool = False) -> None:
+    async def _edit_message(self, channel_id: str, message_ts: str, text: str, *, strict: bool = False,
+                            formatted: bool = False) -> None:
         if not message_ts:
             return
         adapter = self._adapter()
@@ -374,7 +376,7 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
                 raise RuntimeError("Slack client is not available")
             return
         formatter = getattr(adapter, "format_message", None)
-        rendered = formatter(text) if callable(formatter) else text
+        rendered = formatter(text) if callable(formatter) and not formatted else text
         try:
             await client.chat_update(channel=channel_id, ts=message_ts, text=rendered)
         except Exception:
@@ -910,22 +912,24 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
                     # Resume may already have skipped this completed turn while
                     # the worker was waiting to deliver its result.
                     if self._sync_enabled(runtime.binding) and not (saved and saved["completed"]):
+                        if result.turn_id and self.config.shared_daemon:
+                            # Keep the original message for a monitor retry if
+                            # final delivery fails after the Codex turn finishes.
+                            self.store.save_progress(runtime.binding.codex_thread_id, result.turn_id,
+                                                     message_ts=runtime.progress_ts)
                         if result.error or result.interrupted:
                             await self._edit_message(
                                 runtime.binding.channel_id,
                                 runtime.progress_ts,
-                                "⏹ Codex 已中断。" if result.interrupted else "⚠️ Codex turn 未完成。",
+                                ("⏹ Codex 已中断。" if result.interrupted else "⚠️ Codex turn 未完成。")
+                                + (f"\n{result.error}" if result.error else ""),
+                                strict=True,
                             )
-                            if self._sync_enabled(runtime.binding):
-                                await self._post_message(
-                                    runtime.binding.channel_id,
-                                    result.error or "Codex 已中断。",
-                                    thread_ts=runtime.binding.thread_ts,
-                                )
                         else:
-                            await self._edit_message(runtime.binding.channel_id, runtime.progress_ts, "✅ Codex 已完成。")
-                            if self._sync_enabled(runtime.binding):
-                                await self._send_final(runtime.binding, result.final_text or "Codex 已完成，但没有返回文本。")
+                            runtime.progress_ts = await self._send_final(
+                                runtime.binding, result.final_text or "Codex 已完成，但没有返回文本。",
+                                message_ts=runtime.progress_ts,
+                            )
                     if result.turn_id and self.config.shared_daemon:
                         self.store.save_progress(runtime.binding.codex_thread_id, result.turn_id,
                                                  message_ts=runtime.progress_ts, completed=True)
@@ -939,10 +943,12 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
             async with runtime.progress_lock:
                 runtime.progress_updated_at = float("inf")
                 if self._sync_enabled(runtime.binding):
-                    await self._edit_message(runtime.binding.channel_id, runtime.progress_ts, "⚠️ Codex 运行失败。")
-                if self._sync_enabled(runtime.binding):
-                    await self._post_message(runtime.binding.channel_id, f"Codex 运行失败：{exc}",
-                                             thread_ts=runtime.binding.thread_ts)
+                    error_text = f"⚠️ Codex 运行失败：{exc}"
+                    if runtime.progress_ts:
+                        await self._edit_message(runtime.binding.channel_id, runtime.progress_ts, error_text)
+                    else:
+                        await self._post_message(runtime.binding.channel_id, error_text,
+                                                 thread_ts=runtime.binding.thread_ts)
             await self._close_runtime(runtime)
         finally:
             runtime.active = False
@@ -953,21 +959,26 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
                 if self._runtimes.get(runtime.binding.codex_thread_id) is runtime:
                     self._runtimes.pop(runtime.binding.codex_thread_id, None)
 
-    async def _send_final(self, binding: Binding, text: str) -> None:
+    async def _send_final(self, binding: Binding, text: str, *, message_ts: str = "") -> str:
+        """Replace progress with the answer; only overflow needs another message."""
         adapter = self._adapter()
-        sender = getattr(adapter, "send", None)
-        if callable(sender):
-            result = sender(
-                binding.channel_id,
-                text,
-                metadata={"thread_id": binding.thread_ts, "thread_ts": binding.thread_ts},
-            )
-            if asyncio.iscoroutine(result):
-                result = await result
-            if getattr(result, "success", True) is False:
-                raise RuntimeError(getattr(result, "error", None) or "Slack delivery failed")
-            return
-        await self._post_message(binding.channel_id, text, thread_ts=binding.thread_ts)
+        formatter = getattr(adapter, "format_message", None)
+        rendered = formatter(text) if callable(formatter) else text
+        splitter = getattr(adapter, "truncate_message", None)
+        chunks = (splitter(rendered, adapter.MAX_MESSAGE_LENGTH)
+                  if callable(splitter) else [rendered])
+        for index, chunk in enumerate(chunks):
+            if index == 0 and message_ts:
+                await self._edit_message(binding.channel_id, message_ts, chunk,
+                                         strict=True, formatted=True)
+            else:
+                response = await self._post_message(binding.channel_id, chunk,
+                                                    thread_ts=binding.thread_ts, formatted=True)
+                if not response.get("ts"):
+                    raise RuntimeError("Slack did not return a final message timestamp")
+                if index == 0:
+                    message_ts = str(response["ts"])
+        return message_ts
 
     def _on_codex_event(self, runtime: _Runtime, loop: asyncio.AbstractEventLoop, note: dict) -> None:
         method = str(note.get("method") or "")

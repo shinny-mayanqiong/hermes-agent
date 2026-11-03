@@ -92,7 +92,8 @@ async def test_stop_is_durable_and_resume_discards_paused_history(plugin, tmp_pa
     assert not restarted.gateway.adapter.sent
     restarted.catalog.activity = _activity("new", "new result", "completed")
     await restarted._sync_binding(binding)
-    assert [m["text"] for m in restarted.gateway.adapter.sent] == ["new result"]
+    assert restarted.gateway.adapter.client.messages[-1]["text"] == "new result"
+    assert not restarted.gateway.adapter.sent
 
 
 @pytest.mark.asyncio
@@ -251,9 +252,9 @@ async def test_stop_clears_queue_keeps_running_turn_and_gates_delivery(plugin, t
         assert prompts == ["A"]
         if resume_running:
             if outcome == "completed":
-                assert manager.gateway.adapter.sent[-1]["text"] == "finished in background"
+                assert manager.gateway.adapter.client.updates[-1]["text"] == "finished in background"
             else:
-                assert "failed in background" in manager.gateway.adapter.client.messages[-1]["text"]
+                assert "failed in background" in manager.gateway.adapter.client.updates[-1]["text"]
         else:
             assert len(manager.gateway.adapter.client.updates) == updates
             assert len(manager.gateway.adapter.client.messages) == count
@@ -299,15 +300,16 @@ async def test_stop_discards_input_popped_before_session_start_even_after_resume
 
 
 @pytest.mark.asyncio
-async def test_stop_drains_worker_final_status_then_suppresses_answer(plugin, tmp_path):
+async def test_stop_drains_worker_final_delivery_before_acknowledging(plugin, tmp_path):
     manager = _manager(plugin, tmp_path)
     binding = _binding(plugin, manager)
     entered, release = asyncio.Event(), asyncio.Event()
     edit = manager._edit_message
 
     async def slow_edit(*args, **kwargs):
-        entered.set()
-        await release.wait()
+        if args[2] == "answer: work":
+            entered.set()
+            await release.wait()
         return await edit(*args, **kwargs)
 
     manager._edit_message = slow_edit
@@ -324,7 +326,11 @@ async def test_stop_drains_worker_final_status_then_suppresses_answer(plugin, tm
         release.set()
         await asyncio.gather(worker, stop)
         assert "已暂停" in manager.gateway.adapter.client.messages[-1]["text"]
+        assert sum(m["text"] == "answer: work" for m in manager.gateway.adapter.client.messages) == 1
         assert not manager.gateway.adapter.sent
+        updates = len(manager.gateway.adapter.client.updates)
+        await manager._update_progress(runtime, "late update")
+        assert len(manager.gateway.adapter.client.updates) == updates
     finally:
         release.set()
         await asyncio.gather(worker, *([stop] if stop else []), return_exceptions=True)

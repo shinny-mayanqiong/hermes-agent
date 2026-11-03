@@ -48,8 +48,10 @@ for the terminal UI. A plain `codex` process remains standalone and cannot
 share a live session with Slack.
 
 Bound sessions are monitored automatically when the gateway starts. Terminal
-turns update a progress message in the same Slack thread and post their final
-answer there. Polling reads the daemon's status/history without starting a model
+turns update a progress message in the same Slack thread and replace it with
+the complete final answer. Slack-started turns use the same single-message
+delivery; only answers exceeding Slack's message limit need continuation messages.
+Polling reads the daemon's status/history without starting a model
 turn. Delivery checkpoints live beside the bindings in the profile's SQLite
 store, so a gateway restart catches up missed turns and avoids replaying answers
 already delivered. Temporary Slack or daemon failures are retried. As with any

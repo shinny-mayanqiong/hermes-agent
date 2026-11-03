@@ -70,6 +70,10 @@ class FakeSlackClient:
 
     async def chat_update(self, **kwargs):
         self.updates.append(kwargs)
+        for message in self.messages:
+            if message["channel"] == kwargs["channel"] and message["ts"] == kwargs["ts"]:
+                message.update(kwargs)
+                break
         return {"ok": True}
 
     async def chat_getPermalink(self, *, channel, message_ts):
@@ -408,7 +412,9 @@ async def test_new_creates_codex_then_root_and_persists_binding(plugin, tmp_path
     await manager.enqueue_turn(binding, "first prompt", "U_ME")
     await manager._runtimes[binding.codex_thread_id].worker
     assert len(FakeSession.instances) == 1
-    assert manager.gateway.adapter.sent[-1]["text"] == "answer: first prompt"
+    assert manager.gateway.adapter.client.messages[-1]["text"] == "answer: first prompt"
+    assert len(manager.gateway.adapter.client.messages) == 2  # root + one result
+    assert not manager.gateway.adapter.sent
     assert manager.gateway.adapter.pop_count >= 1
 
 
@@ -502,7 +508,9 @@ async def test_bound_thread_turn_then_stop_preserves_connection_and_binding(plug
     runtime = manager._runtimes[binding.codex_thread_id]
     await runtime.worker
 
-    assert manager.gateway.adapter.sent[-1]["text"] == "answer: continue"
+    assert manager.gateway.adapter.client.messages[-1]["text"] == "answer: continue"
+    assert len(manager.gateway.adapter.client.messages) == 1
+    assert not manager.gateway.adapter.sent
     assert FakeSession.instances[-1].resume_thread_id == "codex-1"
     assert FakeSession.instances[-1].closed is False
 
@@ -532,7 +540,7 @@ async def test_bound_thread_accepts_messages_from_any_user_in_home_channel(plugi
     runtime = manager._runtimes[binding.codex_thread_id]
     await runtime.worker
 
-    assert manager.gateway.adapter.sent[-1]["text"] == "answer: continue"
+    assert manager.gateway.adapter.client.messages[-1]["text"] == "answer: continue"
     assert not manager.gateway.adapter.client.ephemeral
     if manager._reaper:
         manager._reaper.cancel()
@@ -699,9 +707,12 @@ async def test_simultaneous_replies_share_one_worker_and_preserve_order(plugin, 
     await manager.enqueue_turn(binding, "second", "U_ME")
     assert manager._runtimes[binding.codex_thread_id].worker is worker
     await worker
-    assert [message["text"] for message in manager.gateway.adapter.sent] == [
+    answers = [message["text"] for message in manager.gateway.adapter.client.messages
+               if message["text"].startswith("answer:")]
+    assert answers == [
         "answer: first", "answer: second",
     ]
+    assert not manager.gateway.adapter.sent
 
 
 def _activity(turn_id, text, status="inProgress"):
@@ -728,30 +739,137 @@ async def test_terminal_progress_and_completion_survive_manager_restart(plugin, 
     restarted.catalog.activity = _activity("terminal-1", "修复已完成，验证通过", "completed")
     await restarted._sync_binding(binding)
     assert restarted.gateway.adapter.client.updates[-1]["ts"] == progress_ts
-    assert restarted.gateway.adapter.sent[-1]["text"] == "修复已完成，验证通过"
+    assert restarted.gateway.adapter.client.messages[-1]["text"] == "修复已完成，验证通过"
     await restarted._sync_binding(binding)
-    assert len(restarted.gateway.adapter.sent) == 1
+    assert len(restarted.gateway.adapter.client.messages) == 1
+    assert not restarted.gateway.adapter.sent
     assert not restarted._runtimes  # Observing never resumes or starts a model turn.
 
 
 @pytest.mark.asyncio
-async def test_sync_retries_failed_slack_delivery_before_marking_done(plugin, tmp_path):
+@pytest.mark.parametrize("observed_progress", [False, True])
+async def test_sync_retries_failed_slack_delivery_before_marking_done(plugin, tmp_path, observed_progress):
     manager = _manager(plugin, tmp_path)
     binding = _binding(plugin, manager)
+    if observed_progress:
+        manager.catalog.activity = _activity("terminal-2", "working")
+        await manager._sync_binding(binding)
     manager.catalog.activity = _activity("terminal-2", "result", "completed")
-    sender = manager.gateway.adapter.send
+    client = manager.gateway.adapter.client
+    method = "chat_update" if observed_progress else "chat_postMessage"
+    deliver = getattr(client, method)
 
     async def fail(*args, **kwargs):
-        return SimpleNamespace(success=False, error="ratelimited")
+        raise RuntimeError("ratelimited")
 
-    manager.gateway.adapter.send = fail
+    setattr(client, method, fail)
     with pytest.raises(RuntimeError, match="ratelimited"):
         await manager._sync_binding(binding)
-    assert not manager.store.progress(binding.codex_thread_id, "terminal-2")["completed"]
-    manager.gateway.adapter.send = sender
+    assert not (manager.store.progress(binding.codex_thread_id, "terminal-2") or {}).get("completed")
+    setattr(client, method, deliver)
     await manager._sync_binding(binding)
-    assert manager.gateway.adapter.sent[-1]["text"] == "result"
+    assert client.messages[-1]["text"] == "result"
     assert len(manager.gateway.adapter.client.messages) == 1
+    assert not manager.gateway.adapter.sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observed_progress", [False, True])
+async def test_completed_turn_has_one_full_result_and_no_replay(plugin, tmp_path, observed_progress):
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+    answer = "内网验收地址：http://192.168.139.6:18185\n\n直接进入：保值计划执行\n" + "验证详情。" * 500
+    if observed_progress:
+        manager.catalog.activity = _activity("result-turn", "working")
+        await manager._sync_binding(binding)
+    manager.catalog.activity = _activity("result-turn", answer, "completed")
+    manager.catalog.activity["turns"][0]["items"][0]["phase"] = "final_answer"
+    await manager._sync_binding(binding)
+    await manager._sync_binding(binding)
+
+    client = manager.gateway.adapter.client
+    assert [message["text"] for message in client.messages] == [answer]
+    assert not manager.gateway.adapter.sent
+    assert manager.store.progress(binding.codex_thread_id, "result-turn")["completed"]
+
+    restarted = _manager(plugin, tmp_path)
+    restarted.gateway = manager.gateway
+    restarted.catalog.activity = manager.catalog.activity
+    await restarted._sync_binding(binding)
+    assert [message["text"] for message in client.messages] == [answer]
+
+
+@pytest.mark.asyncio
+async def test_monitor_retries_worker_final_edit_on_the_same_message(plugin, tmp_path):
+    from dataclasses import replace
+
+    manager = _manager(plugin, tmp_path)
+    manager.config = replace(manager.config, shared_daemon=True)
+    binding = _binding(plugin, manager)
+    client = manager.gateway.adapter.client
+    edit = client.chat_update
+
+    async def fail_final(**kwargs):
+        if kwargs["text"] == "answer: work":
+            raise RuntimeError("ratelimited")
+        return await edit(**kwargs)
+
+    client.chat_update = fail_final
+    await manager.enqueue_turn(binding, "work", "U_ME")
+    await manager._runtimes[binding.codex_thread_id].worker
+    saved = manager.store.progress(binding.codex_thread_id, "turn-slack")
+    assert saved and not saved["completed"]
+    assert saved["message_ts"] == client.messages[0]["ts"]
+    client.chat_update = edit
+    manager.catalog.activity = _activity("turn-slack", "answer: work", "completed")
+    await manager._sync_binding(binding)
+    await manager._sync_binding(binding)
+    assert [message["text"] for message in client.messages] == ["answer: work"]
+    assert manager.store.progress(binding.codex_thread_id, "turn-slack")["completed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["slack", "terminal"])
+async def test_long_result_reuses_progress_and_preserves_all_chunks(plugin, tmp_path, source):
+    from gateway.config import PlatformConfig
+    from plugins.platforms.slack.adapter import SlackAdapter
+
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+    client = manager.gateway.adapter.client
+    adapter = SlackAdapter(PlatformConfig(enabled=True))
+    adapter._app = SimpleNamespace(client=client)
+    manager.gateway = FakeGateway(adapter)
+    rows = [f"row-{index:04}: " + "x" * 100 for index in range(500)]
+    answer = "**验收结果**\nBEGIN\n" + "\n".join(rows) + "\nEND"
+
+    class LongSession(FakeSession):
+        def run_turn(self, text):
+            return TurnResult(final_text=answer, thread_id=binding.codex_thread_id, turn_id="long")
+
+    manager.session_factory = LongSession
+    if source == "slack":
+        await manager.enqueue_turn(binding, "work", "U_ME")
+        await manager._runtimes[binding.codex_thread_id].worker
+        progress_ts = manager._runtimes[binding.codex_thread_id].progress_ts
+    else:
+        manager.catalog.activity = _activity("long", "working")
+        await manager._sync_binding(binding)
+        progress_ts = client.messages[0]["ts"]
+        manager.catalog.activity = _activity("long", answer, "completed")
+        await manager._sync_binding(binding)
+        count = len(client.messages)
+        await manager._sync_binding(binding)
+        assert len(client.messages) == count
+
+    assert client.updates[-1]["ts"] == progress_ts == client.messages[0]["ts"]
+    assert len(client.messages) > 1
+    assert all(len(m["text"]) <= adapter.MAX_MESSAGE_LENGTH for m in client.messages)
+    assert all(m.get("thread_ts") == binding.thread_ts for m in client.messages)
+    combined = "\n".join(m["text"] for m in client.messages)
+    assert combined.startswith("*验收结果*\nBEGIN\n")  # Markdown is converted only once.
+    assert combined.count("END") == 1
+    assert all(combined.count(row) == 1 for row in rows)
 
 
 @pytest.mark.asyncio

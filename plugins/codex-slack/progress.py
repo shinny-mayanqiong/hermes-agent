@@ -146,9 +146,19 @@ class ProgressMirror:
             if error:
                 detail = str(error.get("message") or error)[:1800]
             text = heading + ("\n" + detail if detail else "")
+            if done:
+                answer = final_text(turn)
+                if answer:
+                    text = answer if status == "completed" else heading + "\n" + answer
+                    if error:
+                        text += "\n" + detail
             digest = hashlib.sha256(text.encode()).hexdigest()
             message_ts = saved["message_ts"] if saved else ""
-            if not saved or saved["digest"] != digest:
+            if done:
+                message_ts = await self._send_final(binding, text, message_ts=message_ts)
+                self.store.save_progress(binding.codex_thread_id, turn_id,
+                                         message_ts=message_ts, digest=digest, completed=True)
+            elif not saved or saved["digest"] != digest:
                 if message_ts:
                     await self._edit_message(binding.channel_id, message_ts, text, strict=True)
                 else:
@@ -156,17 +166,6 @@ class ProgressMirror:
                     message_ts = str(response.get("ts") or "")
                     if not message_ts:
                         raise RuntimeError("Slack did not return a progress timestamp")
-                # Save the status before sending the final so a failed send can
-                # retry without creating another progress message.
                 self.store.save_progress(binding.codex_thread_id, turn_id,
                                          message_ts=message_ts, digest=digest)
-            if done:
-                current = self.store.by_codex(binding.codex_thread_id)
-                if not current or current.sync_paused:
-                    return
-                answer = final_text(turn)
-                if answer:
-                    await self._send_final(binding, answer)
-                self.store.save_progress(binding.codex_thread_id, turn_id,
-                                         message_ts=message_ts, digest=digest, completed=True)
             self.store.touch(binding)
