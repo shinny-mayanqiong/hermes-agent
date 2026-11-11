@@ -50,7 +50,9 @@ share a live session with Slack.
 Bound sessions are monitored automatically when the gateway starts. Terminal
 turns update a progress message in the same Slack thread and replace it with
 the complete final answer. Slack-started turns use the same single-message
-delivery; only answers exceeding Slack's message limit need continuation messages.
+delivery; long answers use continuation messages in the same thread. Each part
+is limited to 4,000 UTF-8 bytes after Markdown formatting so Chinese text and
+emoji also fit Slack's update limit.
 Polling reads the daemon's status/history without starting a model
 turn. Delivery checkpoints live beside the bindings in the profile's SQLite
 store, so a gateway restart catches up missed turns and avoids replaying answers

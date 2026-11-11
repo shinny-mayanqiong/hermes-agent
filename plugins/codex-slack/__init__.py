@@ -965,7 +965,10 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
         formatter = getattr(adapter, "format_message", None)
         rendered = formatter(text) if callable(formatter) else text
         splitter = getattr(adapter, "truncate_message", None)
-        chunks = (splitter(rendered, adapter.MAX_MESSAGE_LENGTH)
+        # chat.update can reject multibyte text below 4,000 characters. Budget
+        # UTF-8 bytes after formatting, including fences and chunk indicators.
+        chunks = (splitter(rendered, min(4000, adapter.MAX_MESSAGE_LENGTH),
+                           len_fn=lambda value: len(value.encode("utf-8")))
                   if callable(splitter) else [rendered])
         for index, chunk in enumerate(chunks):
             if index == 0 and message_ts:

@@ -372,6 +372,31 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
             assert manager.store.progress("existing-session", "history-1")["completed"]
             assert "existing-session" not in manager._runtimes
             assert daemon.prompts == ["do the work"]
+
+            # A long terminal result must replace its progress message within
+            # chat.update's byte limit and deliver every remaining row.
+            turn = {"id": "long-terminal-turn", "status": "inProgress", "items": []}
+            daemon.threads["existing-session"]["turns"].append(turn)
+            before_long = len(api.messages)
+            await manager._sync_binding(existing)
+            progress_ts = manager.store.progress("existing-session", turn["id"])["message_ts"]
+            rows = [f"验收条目 {index:04}: " + "内容" * 40 for index in range(100)]
+            turn.update(status="completed", items=[{
+                "type": "agentMessage", "text": "\n".join(rows), "phase": "final_answer",
+            }])
+            await manager._sync_binding(existing)
+            delivered = api.messages[before_long:]
+            assert len(delivered) > 1
+            assert delivered[0]["ts"] == progress_ts
+            assert all(len(message["text"].encode("utf-8")) <= 4000 for message in delivered)
+            assert all(message.get("thread_ts") == existing.thread_ts for message in delivered)
+            combined = "\n".join(message["text"] for message in delivered)
+            assert all(combined.count(row) == 1 for row in rows)
+            assert manager.store.progress("existing-session", turn["id"])["completed"]
+            before_retry = (len(api.messages), len(api.updates))
+            await manager._sync_binding(existing)
+            assert (len(api.messages), len(api.updates)) == before_retry
+            assert daemon.prompts == ["do the work"]
         finally:
             if daemon.finish_turn is not None:
                 daemon.finish_turn.set()

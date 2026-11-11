@@ -69,6 +69,9 @@ class FakeSlackClient:
         return message
 
     async def chat_update(self, **kwargs):
+        if len(kwargs.get("text", "").encode("utf-8")) > 4000:
+            from slack_sdk.errors import SlackApiError
+            raise SlackApiError("Message text is too long", {"ok": False, "error": "msg_too_long"})
         self.updates.append(kwargs)
         for message in self.messages:
             if message["channel"] == kwargs["channel"] and message["ts"] == kwargs["ts"]:
@@ -778,7 +781,7 @@ async def test_sync_retries_failed_slack_delivery_before_marking_done(plugin, tm
 async def test_completed_turn_has_one_full_result_and_no_replay(plugin, tmp_path, observed_progress):
     manager = _manager(plugin, tmp_path)
     binding = _binding(plugin, manager)
-    answer = "内网验收地址：http://192.168.139.6:18185\n\n直接进入：保值计划执行\n" + "验证详情。" * 500
+    answer = "内网验收地址：http://192.168.139.6:18185\n\n直接进入：保值计划执行\n" + "验证详情。" * 200
     if observed_progress:
         manager.catalog.activity = _activity("result-turn", "working")
         await manager._sync_binding(binding)
@@ -830,7 +833,8 @@ async def test_monitor_retries_worker_final_edit_on_the_same_message(plugin, tmp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source", ["slack", "terminal"])
-async def test_long_result_reuses_progress_and_preserves_all_chunks(plugin, tmp_path, source):
+@pytest.mark.parametrize("content", ["long", "code", "escaped", "unicode"])
+async def test_long_result_reuses_progress_and_preserves_all_chunks(plugin, tmp_path, source, content):
     from gateway.config import PlatformConfig
     from plugins.platforms.slack.adapter import SlackAdapter
 
@@ -840,8 +844,17 @@ async def test_long_result_reuses_progress_and_preserves_all_chunks(plugin, tmp_
     adapter = SlackAdapter(PlatformConfig(enabled=True))
     adapter._app = SimpleNamespace(client=client)
     manager.gateway = FakeGateway(adapter)
-    rows = [f"row-{index:04}: " + "x" * 100 for index in range(500)]
-    answer = "**验收结果**\nBEGIN\n" + "\n".join(rows) + "\nEND"
+    unit = {"long": "x", "code": "中文😀", "escaped": "<&>", "unicode": "中文😀"}[content]
+    row_count = {"long": 500, "code": 50, "escaped": 10, "unicode": 10}[content]
+    rows = [f"row-{index:04}: " + unit * 100 for index in range(row_count)]
+    body = "\n".join(rows)
+    if content == "code":
+        body = "```python\n" + body + "\n```"
+    answer = "**验收结果**\nBEGIN\n" + body + "\nEND"
+    if content == "escaped":
+        assert len(answer) < 4000 < len(adapter.format_message(answer))
+    if content == "unicode":
+        assert len(answer) < 4000 < len(answer.encode("utf-8"))
 
     class LongSession(FakeSession):
         def run_turn(self, text):
@@ -864,12 +877,45 @@ async def test_long_result_reuses_progress_and_preserves_all_chunks(plugin, tmp_
 
     assert client.updates[-1]["ts"] == progress_ts == client.messages[0]["ts"]
     assert len(client.messages) > 1
-    assert all(len(m["text"]) <= adapter.MAX_MESSAGE_LENGTH for m in client.messages)
+    assert all(len(m["text"].encode("utf-8")) <= 4000 for m in client.messages)
     assert all(m.get("thread_ts") == binding.thread_ts for m in client.messages)
     combined = "\n".join(m["text"] for m in client.messages)
     assert combined.startswith("*验收结果*\nBEGIN\n")  # Markdown is converted only once.
     assert combined.count("END") == 1
-    assert all(combined.count(row) == 1 for row in rows)
+    assert all(combined.count(adapter.format_message(row) if content == "escaped" else row) == 1
+               for row in rows)
+    if content == "code":
+        assert all(m["text"].count("```") % 2 == 0 for m in client.messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [4000, 4001])
+@pytest.mark.parametrize("unit", ["a", "文", "😀"])
+@pytest.mark.parametrize("replace_progress", [False, True])
+async def test_final_delivery_respects_slack_text_limit(plugin, tmp_path, size, unit, replace_progress):
+    from gateway.config import PlatformConfig
+    from plugins.platforms.slack.adapter import SlackAdapter
+
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+    client = manager.gateway.adapter.client
+    adapter = SlackAdapter(PlatformConfig(enabled=True))
+    adapter._app = SimpleNamespace(client=client)
+    manager.gateway = FakeGateway(adapter)
+    message_ts = ""
+    if replace_progress:
+        message_ts = (await manager._post_message(binding.channel_id, "working",
+                                                  thread_ts=binding.thread_ts))["ts"]
+    count, padding = divmod(size, len(unit.encode("utf-8")))
+    answer = unit * count + "x" * padding
+    await manager._send_final(binding, answer, message_ts=message_ts)
+
+    assert len(client.messages) == (1 if size == 4000 else 2)
+    assert all(len(message["text"].encode("utf-8")) <= 4000 for message in client.messages)
+    assert sum(message["text"].count(unit) for message in client.messages) == count
+    assert sum(message["text"].count("x") for message in client.messages) == padding
+    if replace_progress:
+        assert client.updates[-1]["ts"] == message_ts == client.messages[0]["ts"]
 
 
 @pytest.mark.asyncio
