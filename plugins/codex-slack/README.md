@@ -60,8 +60,10 @@ checkpoint can cause that answer to be delivered again.
 
 The polling interval is a minimum delay between scans; a large catch-up or a
 slow daemon can take longer. Only sessions explicitly bound with `new` or
-`resume` are mirrored. Old history is not bulk-posted when a session is first
-bound; `!status` shows the most recent progress.
+`resume` are mirrored. On first binding, the latest turn's output is shown even
+if the session is idle or interrupted; earlier history is not bulk-posted.
+Repeated opens and gateway restarts do not replay that output. `!status` shows
+the most recent progress.
 
 Regenerate and apply the Slack app manifest after enabling the plugin so Slack
 knows about the native `/codex` and `/odoo-hedge-codex` commands. Until then, every command below also

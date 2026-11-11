@@ -347,6 +347,31 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
             assert manager.store.by_codex("thread-1").state == "active"
             assert not any(method == "thread/delete" for method, _ in daemon.requests)
             assert daemon.prompts == ["do the work"]
+
+            # First opening an existing idle session shows its last output,
+            # even when it finished long before the Slack binding was created.
+            old_time = int(time.time()) - 3600
+            daemon.threads["existing-session"] = {
+                "id": "existing-session", "cwd": str(repo), "source": "cli",
+                "createdAt": old_time, "updatedAt": old_time,
+                "status": {"type": "idle"},
+                "turns": [{
+                    "id": f"history-{index}", "status": "completed", "completedAt": old_time,
+                    "items": [{"type": "agentMessage", "text": text, "phase": "final_answer"}],
+                } for index, text in enumerate(["earlier output", "最近一次的输出信息"])],
+            }
+            daemon.modes["existing-session"] = dict(daemon.modes["thread-1"])
+            await project_slash("resume existing-session")
+            existing = manager.store.by_codex("existing-session")
+            assert existing is not None
+            await manager._sync_binding(existing)
+            await project_slash("resume existing-session")
+            assert [m["text"] for m in api.messages if m.get("thread_ts") == existing.thread_ts] == [
+                "最近一次的输出信息",
+            ]
+            assert manager.store.progress("existing-session", "history-1")["completed"]
+            assert "existing-session" not in manager._runtimes
+            assert daemon.prompts == ["do the work"]
         finally:
             if daemon.finish_turn is not None:
                 daemon.finish_turn.set()

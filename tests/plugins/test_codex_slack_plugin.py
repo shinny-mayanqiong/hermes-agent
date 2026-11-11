@@ -888,12 +888,69 @@ async def test_status_and_stop_use_terminal_owned_turn_without_local_worker(plug
 
 
 @pytest.mark.asyncio
-async def test_sync_seeds_history_and_skips_slack_owned_turns(plugin, tmp_path):
+@pytest.mark.parametrize("status", ["completed", "interrupted"])
+async def test_first_sync_shows_latest_old_output_once(plugin, tmp_path, status):
     manager = _manager(plugin, tmp_path)
     binding = _binding(plugin, manager)
-    manager.catalog.activity = _activity("old-turn", "old answer", "completed")
-    await manager._sync_binding(binding, initialize=True)
-    assert not manager.gateway.adapter.sent
+    answer = "最近一次的验收结果\n" + "详细输出。" * 500
+    older = _activity("older-turn", "更早的历史不要补发", "completed")["turns"][0]
+    latest = _activity("latest-turn", answer, status)["turns"][0]
+    older["completedAt"] = latest["completedAt"] = int(binding.created_at) - 3600
+    manager.catalog.activity = {"status": {"type": "notLoaded"}, "turns": [older, latest]}
+
+    await manager._sync_binding(binding)
+    messages = manager.gateway.adapter.client.messages
+    assert len(messages) == 1
+    assert answer in messages[0]["text"]
+    assert "更早的历史不要补发" not in messages[0]["text"]
+    if status == "interrupted":
+        assert "已中断" in messages[0]["text"]
+    assert manager.store.progress(binding.codex_thread_id, "latest-turn")["completed"]
+    assert not manager._runtimes  # Reading existing output never starts a task.
+
+    restarted = _manager(plugin, tmp_path)
+    restarted.gateway = manager.gateway
+    restarted.catalog.activity = manager.catalog.activity
+    await restarted._sync_binding(binding)
+    assert len(messages) == 1
+
+    # Later reconnects still catch up every new turn after the checkpoint.
+    restarted.catalog.activity["turns"].extend([
+        _activity("new-turn-1", "新结果一", "completed")["turns"][0],
+        _activity("new-turn-2", "新结果二", "completed")["turns"][0],
+    ])
+    await restarted._sync_binding(binding)
+    assert [m["text"] for m in messages[1:]] == ["新结果一", "新结果二"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["read", "send"])
+async def test_first_sync_retries_old_output_after_failure(plugin, tmp_path, failure):
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
+    manager.catalog.activity = _activity("old-turn", "最近输出", "completed")
+    manager.catalog.activity["turns"][0]["completedAt"] = int(binding.created_at) - 3600
+    target, method = ((manager.catalog, "read_activity") if failure == "read"
+                      else (manager.gateway.adapter.client, "chat_postMessage"))
+    original = getattr(target, method)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("temporarily unavailable")
+
+    setattr(target, method, fail)
+    with pytest.raises(RuntimeError, match="temporarily unavailable"):
+        await manager._sync_binding(binding)
+    assert not manager.store.progress(binding.codex_thread_id)
+    setattr(target, method, original)
+    await manager._sync_binding(binding)
+    await manager._sync_binding(binding)
+    assert [m["text"] for m in manager.gateway.adapter.client.messages] == ["最近输出"]
+
+
+@pytest.mark.asyncio
+async def test_sync_skips_slack_owned_turns(plugin, tmp_path):
+    manager = _manager(plugin, tmp_path)
+    binding = _binding(plugin, manager)
     runtime = manager._runtime(binding)
     runtime.active = True
     manager.catalog.activity = _activity("slack-turn", "in flight")

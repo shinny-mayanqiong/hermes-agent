@@ -94,12 +94,12 @@ class ProgressMirror:
                 logger.exception("Codex progress monitor failed")
             await asyncio.sleep(self.config.progress_poll_seconds)
 
-    async def _sync_binding(self, binding, *, initialize: bool = False) -> None:
+    async def _sync_binding(self, binding) -> None:
         lock = self._mirror_locks.setdefault(binding.codex_thread_id, asyncio.Lock())
         async with lock:
-            await self._sync_binding_locked(binding, initialize=initialize)
+            await self._sync_binding_locked(binding)
 
-    async def _sync_binding_locked(self, binding, *, initialize: bool = False) -> None:
+    async def _sync_binding_locked(self, binding) -> None:
         current = self.store.by_codex(binding.codex_thread_id)
         if not current or current.state != "active" or current.sync_paused or not self._cwd_allowed(current.cwd):
             return
@@ -122,6 +122,12 @@ class ProgressMirror:
                 if turn.get("id") == previous["turn_id"]:
                     turns = turns[index:]
                     break
+        else:
+            # Show the latest existing turn on first opening, including an idle
+            # or interrupted session. Older app-servers may return all history.
+            # No checkpoint also covers a failed first read/send or a restart
+            # before initialization finished, so the preview remains retryable.
+            turns = turns[-1:]
         for turn in turns:
             current = self.store.by_codex(binding.codex_thread_id)
             if not current or current.sync_paused:
@@ -133,11 +139,6 @@ class ProgressMirror:
             done = status != "inProgress"
             saved = self.store.progress(binding.codex_thread_id, turn_id)
             if saved and saved["completed"]:
-                continue
-            # Seed old history on a new binding, but catch up runs started since
-            # binding creation if Hermes stopped before the first polling tick.
-            if not previous and done and (initialize or (turn.get("completedAt") or 0) < int(binding.created_at)):
-                self.store.save_progress(binding.codex_thread_id, turn_id, completed=True)
                 continue
             detail = turn_progress(turn)
             heading = {"completed": "✅ Codex 已完成。", "interrupted": "⏹ Codex 已中断。",

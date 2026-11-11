@@ -562,7 +562,7 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
             runtime.has_history = False
         if self.config.shared_daemon:
             try:
-                await self._sync_binding(binding, initialize=True)
+                await self._sync_binding(binding)
             except Exception:
                 logger.warning("Unable to seed Codex progress; will retry", exc_info=True)
             self.start(self.gateway)
