@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 from typing import Any
 
 from . import workflow
@@ -233,13 +234,24 @@ async def _handle_slack_pr_review_event(event: Any, gateway: Any, args: str) -> 
         _remember_slack_thread(adapter, thread_ts, str(response.get("ts") or ""))
         return
 
+    status = result["task_status"]
+    status_label = {"ready": "queued", "done": "completed"}.get(status, status)
     lines = [
-        "Odoo Hedge PR review started.",
+        f"Odoo Hedge PR review {status_label}.",
         f"Kanban task: `{result['task_id']}`",
         f"PR: {result['pr_url']}",
         f"Worktree: `{result['worktree']}`",
-        "This thread is subscribed to completion and blocked notifications.",
     ]
+    if result.get("reused"):
+        lines.append("Reusing the existing task for this PR commit. No new attempt was started.")
+    if result.get("reason"):
+        lines.append(f"Reason: {result['reason']}")
+    if status == "blocked":
+        retry = shlex.join(["hermes", "kanban", "--board", board, "unblock", result["task_id"]])
+        lines.append(f"After resolving the blocker, retry with `{retry}`.")
+    if result.get("pr_comment_url"):
+        lines.append(f"Review: {result['pr_comment_url']}")
+    lines.append("This thread is subscribed to completion and blocked notifications.")
     response = await _post_slack_message(adapter, chat_id, "\n".join(lines), thread_ts=thread_ts)
     _remember_slack_thread(adapter, thread_ts, str(response.get("ts") or ""))
 

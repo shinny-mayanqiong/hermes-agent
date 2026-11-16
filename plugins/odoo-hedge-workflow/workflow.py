@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent.redact import redact_sensitive_text
 from hermes_cli import kanban_db as kb
 
 WORKFLOW_TYPE = "odoo_hedge_dynamic_delivery_v1"
@@ -1408,6 +1409,33 @@ def _pr_review_task_body(
     return "\n".join(lines)
 
 
+def _pr_review_task_result(conn, task: kb.Task, *, board: str, reused: bool) -> dict[str, Any]:
+    meta = _task_meta(task)
+    pr = meta.get("pr") or {}
+    runs = kb.list_runs(conn, task.id) if task.status == "blocked" else []
+    reason = (runs[-1].summary if runs else task.last_failure_error) or ""
+    return {
+        "kind": "pr_review",
+        "board": board,
+        "task_id": task.id,
+        "task_status": task.status,
+        "reused": reused,
+        "reason": redact_sensitive_text(reason, force=True),
+        "pr_number": pr.get("number"),
+        "pr_url": pr.get("url"),
+        "pr_title": pr.get("title"),
+        "pr_comment_url": _result_meta(task).get("pr_comment_url", ""),
+        "repo": meta.get("repo"),
+        "repo_slug": meta.get("repo_slug"),
+        "worktree": task.workspace_path,
+        "worktree_source": meta.get("worktree_source"),
+        "branch": task.branch_name,
+        "base_branch": meta.get("base_branch"),
+        "head_sha": pr.get("headRefOid"),
+        "review_focus": meta.get("review_focus", ""),
+    }
+
+
 def start_pr_review(
     raw_args: str,
     *,
@@ -1433,6 +1461,22 @@ def start_pr_review(
     base_branch = str(pr_data.get("baseRefName") or "master")
     head_ref = str(pr_data.get("headRefName") or "")
     head_sha = str(pr_data.get("headRefOid") or "")
+    idempotency_key = (
+        f"{WORKFLOW_TYPE}:{PR_REVIEW_ENTRY}:{repo_slug}:"
+        f"{pr_ref.number}:{head_sha or head_ref or 'unknown'}"
+    )
+    # Resolve duplicates before preparing a worktree: a completed review may
+    # already have cleaned it up, and a blocked task requires explicit unblock.
+    with kb.connect_closing(board=board) as conn:
+        existing = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (idempotency_key,),
+        ).fetchone()
+        if existing:
+            return _pr_review_task_result(
+                conn, _load_task(conn, existing["id"]), board=board, reused=True,
+            )
     resolved = _prepare_pr_review_worktree(
         repo=repo_path,
         pr_number=pr_ref.number,
@@ -1489,7 +1533,6 @@ def start_pr_review(
     if title_suffix:
         title = f"{title} - {title_suffix[:90]}"
 
-    idempotency_head = head_sha or head_ref or "unknown"
     with kb.connect_closing(board=board) as conn:
         task_id = kb.create_task(
             conn,
@@ -1501,10 +1544,7 @@ def start_pr_review(
             workspace_path=resolved.worktree,
             branch_name=resolved.branch,
             priority=0,
-            idempotency_key=(
-                f"{WORKFLOW_TYPE}:{PR_REVIEW_ENTRY}:{repo_slug}:"
-                f"{pr_ref.number}:{idempotency_head}"
-            ),
+            idempotency_key=idempotency_key,
             board=board,
         )
         kb.add_comment(
@@ -1513,7 +1553,7 @@ def start_pr_review(
             WORKFLOW_PLUGIN_AUTHOR,
             "\n".join(
                 [
-                    "pr_review_started: true",
+                    "pr_review_requested: true",
                     f"pr: {repo_slug}#{pr_ref.number}",
                     f"worktree: {resolved.worktree}",
                     f"branch: {resolved.branch or ''}",
@@ -1523,22 +1563,9 @@ def start_pr_review(
             ),
         )
 
-    return {
-        "kind": "pr_review",
-        "board": board,
-        "task_id": task_id,
-        "pr_number": pr_ref.number,
-        "pr_url": metadata["pr"]["url"],
-        "pr_title": metadata["pr"]["title"],
-        "repo": str(repo_path),
-        "repo_slug": repo_slug,
-        "worktree": resolved.worktree,
-        "worktree_source": resolved.source,
-        "branch": resolved.branch,
-        "base_branch": base_branch,
-        "head_sha": head_sha,
-        "review_focus": review_focus,
-    }
+        return _pr_review_task_result(
+            conn, _load_task(conn, task_id), board=board, reused=False,
+        )
 
 
 def _normalized_approval(result: dict[str, Any], *, positive_next_phases: set[str]) -> bool | None:
@@ -2505,6 +2532,38 @@ def _finalize_pr_review_metadata(metadata: dict[str, Any], meta: dict[str, Any])
     return finalized
 
 
+def _codex_exec_failure_detail(summary: str, log_path: Path, log_start: int) -> str:
+    """Read explicit errors from this attempt's inherited stdout/stderr log."""
+    if summary:
+        return redact_sensitive_text(summary, force=True)[:1000]
+    try:
+        with log_path.open("rb") as log:
+            log.seek(0, os.SEEK_END)
+            log.seek(max(log_start, log.tell() - 16384))
+            tail = log.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    errors = []
+    for line in tail.splitlines():
+        match = re.match(r"\s*error(?:\s*:|\s+)\s*(.+)", line, re.IGNORECASE)
+        if not match:
+            continue
+        detail = match.group(1)
+        try:
+            payload = json.loads(detail)
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict) and error.get("message"):
+                detail = str(error["message"])
+            elif payload.get("message"):
+                detail = str(payload["message"])
+        if detail not in errors:
+            errors.append(detail)
+    return redact_sensitive_text("\n".join(errors), force=True)[:1000]
+
+
 def run_codex_exec_worker(task_id: str, *, board: str) -> dict[str, Any]:
     with kb.connect_closing(board=board) as conn:
         task = _load_task(conn, task_id)
@@ -2525,6 +2584,11 @@ def run_codex_exec_worker(task_id: str, *, board: str) -> dict[str, Any]:
     codex_bin = os.environ.get("ODOO_HEDGE_CODEX_BIN", "codex")
     log_dir = kb.worker_logs_dir(board=board)
     log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{task_id}.log"
+    try:
+        log_start = log_path.stat().st_size
+    except OSError:
+        log_start = 0
     with tempfile.NamedTemporaryFile(
         prefix=f"{task_id}-last-message-",
         suffix=".txt",
@@ -2581,8 +2645,9 @@ def run_codex_exec_worker(task_id: str, *, board: str) -> dict[str, Any]:
 
     if proc.returncode != 0:
         reason = f"codex exec failed with exit code {proc.returncode}"
-        if summary:
-            reason = reason + ": " + summary[:1000]
+        detail = _codex_exec_failure_detail(summary, log_path, log_start)
+        if detail:
+            reason += ": " + detail
         _block_current_run(task_id, board=board, run_id=run_id, reason=reason)
         return {"kind": "codex_exec_worker", "task_id": task_id, "status": "blocked", "reason": reason}
 

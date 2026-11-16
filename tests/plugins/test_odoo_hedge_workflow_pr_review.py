@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -92,7 +94,8 @@ def test_parse_pr_review_rejects_invalid_input(workflow):
         workflow.parse_pr_review_request("not-a-pr")
 
 
-def test_start_pr_review_creates_review_only_kanban_task(
+@pytest.fixture
+def pr_review_repo(
     workflow,
     kanban_home,
     tmp_path,
@@ -136,14 +139,20 @@ def test_start_pr_review_creates_review_only_kanban_task(
         ),
     )
 
+    return repo
+
+
+def test_start_pr_review_creates_review_only_kanban_task(workflow, pr_review_repo):
     result = workflow.start_pr_review(
         "42 focus on accounting edge cases",
         board="odoo-hedge-dev",
-        repo=str(repo),
+        repo=str(pr_review_repo),
         requester="Alice (U123)",
     )
 
     assert result["kind"] == "pr_review"
+    assert result["task_status"] == "ready"
+    assert result["reused"] is False
     assert result["task_id"].startswith("t_")
     with kb.connect_closing(board="odoo-hedge-dev") as conn:
         task = kb.get_task(conn, result["task_id"])
@@ -156,11 +165,96 @@ def test_start_pr_review_creates_review_only_kanban_task(
     assert meta["pr"]["number"] == 42
     assert meta["review_focus"] == "focus on accounting edge cases"
     assert task.assignee == workflow.CODE_REVIEWER
-    assert task.workspace_path == str(worktree)
+    assert task.workspace_path == str(pr_review_repo.parent / "review-worktree")
     with kb.connect_closing(board="odoo-hedge-dev") as conn:
         comments = kb.list_comments(conn, result["task_id"])
     assert any("pr: shinnytech/odoo-hedge#42" in comment.body for comment in comments)
     assert all("https://github.com/shinnytech/odoo-hedge/pull/42" not in comment.body for comment in comments)
+
+
+@pytest.mark.parametrize("status", ["ready", "running", "blocked", "done"])
+def test_repeat_pr_review_returns_existing_state_without_recreating_worktree(
+    workflow, pr_review_repo, monkeypatch, status,
+):
+    first = workflow.start_pr_review("42 original focus", repo=str(pr_review_repo))
+    with kb.connect_closing(board="odoo-hedge-dev") as conn:
+        if status == "running":
+            assert kb.claim_task(conn, first["task_id"])
+        elif status == "blocked":
+            assert kb.block_task(conn, first["task_id"], reason="Codex needs an upgrade")
+        elif status == "done":
+            assert kb.complete_task(conn, first["task_id"], result=json.dumps({
+                "pr_comment_url": "https://github.com/shinnytech/odoo-hedge/pull/42#issuecomment-1",
+            }))
+        runs_before = kb.list_runs(conn, first["task_id"])
+        comments_before = kb.list_comments(conn, first["task_id"])
+
+    def unexpected_worktree(**_kwargs):
+        pytest.fail("repeated requests must not recreate an existing review's worktree")
+
+    monkeypatch.setattr(workflow, "_prepare_pr_review_worktree", unexpected_worktree)
+    repeated = workflow.start_pr_review("42 different focus", repo=str(pr_review_repo))
+
+    assert repeated["task_id"] == first["task_id"]
+    assert repeated["task_status"] == status
+    assert repeated["reused"] is True
+    assert repeated["review_focus"] == "original focus"
+    if status == "blocked":
+        assert repeated["reason"] == "Codex needs an upgrade"
+    if status == "done":
+        assert repeated["pr_comment_url"].endswith("#issuecomment-1")
+    with kb.connect_closing(board="odoo-hedge-dev") as conn:
+        assert kb.get_task(conn, first["task_id"]).status == status
+        assert kb.list_runs(conn, first["task_id"]) == runs_before
+        assert kb.list_comments(conn, first["task_id"]) == comments_before
+
+
+@pytest.mark.parametrize("emit_error", [True, False])
+def test_codex_worker_reports_current_process_error_from_real_log(
+    workflow, pr_review_repo, monkeypatch, tmp_path, emit_error,
+):
+    task_id = workflow.start_pr_review("42", repo=str(pr_review_repo))["task_id"]
+    with kb.connect_closing(board="odoo-hedge-dev") as conn:
+        assert kb.claim_task(conn, task_id)
+
+    codex = tmp_path / "codex"
+    message = "The configured model requires a newer version of Codex."
+    codex.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        + (f"print('ERROR: ' + {json.dumps({'error': {'message': message}})!r}, file=sys.stderr)\n" if emit_error else "")
+        + "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    codex.chmod(0o755)
+    monkeypatch.setenv("ODOO_HEDGE_CODEX_BIN", str(codex))
+    log_dir = kb.worker_logs_dir(board="odoo-hedge-dev")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{task_id}.log"
+    log_path.write_text("ERROR: stale failure from an older attempt\n", encoding="utf-8")
+    # Real imports, subprocess I/O, and Kanban transitions against the temp home.
+    runner = tmp_path / "worker.py"
+    runner.write_text(
+        "import importlib.util, sys\n"
+        f"sys.path.insert(0, {str(PLUGIN_DIR.parents[1])!r})\n"
+        f"spec = importlib.util.spec_from_file_location('review_test_plugin', {str(PLUGIN_DIR / '__init__.py')!r}, submodule_search_locations=[{str(PLUGIN_DIR)!r}])\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "sys.modules[spec.name] = module\n"
+        "spec.loader.exec_module(module)\n"
+        f"module.workflow.run_codex_exec_worker({task_id!r}, board='odoo-hedge-dev')\n",
+        encoding="utf-8",
+    )
+    with log_path.open("ab") as log:
+        subprocess.run(
+            [sys.executable, str(runner)], env=dict(os.environ),
+            stdout=log, stderr=subprocess.STDOUT, check=True, timeout=20,
+        )
+    with kb.connect_closing(board="odoo-hedge-dev") as conn:
+        assert kb.get_task(conn, task_id).status == "blocked"
+        reason = kb.list_runs(conn, task_id)[-1].summary
+    assert "exit code 1" in reason
+    assert (message in reason) is emit_error
+    assert "stale failure" not in reason
 
 
 def test_codex_exec_prompt_includes_pr_review_contract(workflow):
@@ -367,6 +461,8 @@ async def test_slack_pr_review_creates_task_thread_and_subscription(pr_review, m
         assert requester == "Alice (U123)"
         return {
             "task_id": "t_abc123",
+            "task_status": "ready",
+            "reused": False,
             "pr_url": "https://github.com/shinnytech/odoo-hedge/pull/42",
             "worktree": "/tmp/review",
         }
@@ -388,9 +484,46 @@ async def test_slack_pr_review_creates_task_thread_and_subscription(pr_review, m
     assert "Odoo Hedge PR review requested" in root["text"]
     assert reply["thread_ts"] == root["ts"]
     assert "Kanban task: `t_abc123`" in reply["text"]
+    assert "queued" in reply["text"]
     assert subscriptions[0]["task_id"] == "t_abc123"
     assert subscriptions[0]["thread_ts"] == root["ts"]
     assert adapter.pop_slash_context_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["ready", "running", "blocked", "done"])
+async def test_slack_repeated_review_reports_actual_state(
+    pr_review, workflow, pr_review_repo, monkeypatch, status,
+):
+    monkeypatch.setattr(pr_review, "_repo", lambda: str(pr_review_repo))
+    first = workflow.start_pr_review("42", repo=str(pr_review_repo))
+    with kb.connect_closing(board="odoo-hedge-dev") as conn:
+        if status == "running":
+            assert kb.claim_task(conn, first["task_id"])
+        elif status == "blocked":
+            assert kb.block_task(conn, first["task_id"], reason="Codex needs an upgrade")
+        elif status == "done":
+            assert kb.complete_task(conn, first["task_id"], result=json.dumps({
+                "pr_comment_url": "https://github.com/shinnytech/odoo-hedge/pull/42#issuecomment-1",
+            }))
+    adapter = FakeSlackAdapter()
+    gateway = SimpleNamespace(
+        adapters={Platform.SLACK: adapter},
+        _active_profile_name=lambda: "default",
+    )
+
+    await pr_review._handle_slack_pr_review_event(_event("/pr-review 42"), gateway, "42")
+
+    reply = adapter.client.messages[-1]["text"]
+    assert "PR review started" not in reply
+    assert "No new attempt was started" in reply
+    assert first["task_id"] in reply
+    assert {"ready": "queued", "running": "running", "blocked": "blocked", "done": "completed"}[status] in reply
+    if status == "blocked":
+        assert "Codex needs an upgrade" in reply
+        assert f"unblock {first['task_id']}" in reply
+    if status == "done":
+        assert "#issuecomment-1" in reply
 
 
 def test_pre_gateway_dispatch_does_not_bypass_auth(pr_review):

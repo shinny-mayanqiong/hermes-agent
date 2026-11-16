@@ -174,6 +174,13 @@ def _print_result(result: dict, *, as_json: bool) -> None:
         return
     if kind == "pr_review":
         print(f"PR review task: {result['task_id']}")
+        print(f"Status:         {result['task_status']}")
+        if result.get("reused"):
+            print("Existing task reused; no new attempt was started.")
+        if result.get("reason"):
+            print(f"Reason:         {result['reason']}")
+        if result.get("pr_comment_url"):
+            print(f"Review:         {result['pr_comment_url']}")
         print(f"Board:          {result['board']}")
         print(f"PR:             {result['pr_url']}")
         print(f"Branch:         {result.get('branch') or '(unknown)'}")
