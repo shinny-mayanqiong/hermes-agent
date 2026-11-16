@@ -1,7 +1,7 @@
 ---
 name: odoo-hedge-server
 description: Operate Odoo sandbox lifecycle from Slack.
-version: 1.1.0
+version: 1.2.0
 platforms: [linux, macos]
 metadata:
   hermes:
@@ -57,6 +57,10 @@ operation, or when the requested capability is not clear:
    unclear for the current task.
 4. Use prompts only when resources do not clearly select an operation.
 
+Use live `tools/list` as the authority for accepted parameters. For example,
+the workflow guide mentions `expected_revision`, but pass it only if the live
+tool schema supports it.
+
 Use the operation map as the routing layer: match user intent to an operation
 id, validate required inputs, run preconditions, then run steps in order.
 
@@ -90,6 +94,10 @@ user requests into tool calls:
 - `sandbox.healthz`: check service health with `sandbox_healthz`.
 - `sandbox.list`: list sandboxes with `list_sandboxes`.
 - `sandbox.get`: inspect one sandbox with `get_sandbox`.
+- `sandbox.configuration.get`: read desired/applied configuration.
+- `sandbox.configuration.update`: patch desired configuration and apply it.
+- `sandbox.restart`: reapply desired configuration and recreate the runtime.
+- `sandbox.ensure_running`: recover an exited container.
 - `sandbox.create`: prepare source, create a sandbox, then provision defaults.
 - `sandbox.upgrade`: prepare source, upgrade a sandbox, then inspect it.
 - `sandbox.destroy`: destroy a sandbox.
@@ -108,7 +116,8 @@ examples above, use the live map.
 Classify each request before calling tools:
 
 - `readonly`: health, list, get, and readonly shell inspection.
-- `mutating_control`: create, upgrade, install module, and provision defaults.
+- `mutating_control`: create, upgrade, install module, provision defaults,
+  update configuration, restart, and recover an exited container.
 - `mutating_shell`: Odoo shell code that writes data.
 - `destructive_control`: destroy sandbox.
 
@@ -160,8 +169,8 @@ Slug parsing:
 
 For `sandbox.create`:
 
-1. Collect `owner`. Use the Slack requester from thread context when
-   available; otherwise ask for the username.
+1. Use the Slack requester as `owner` when available. The live create schema
+   allows omitting owner; do not block creation solely on a missing username.
 2. Collect optional `slug` only when the user explicitly names it.
 3. Collect one source target: `branch`, `commit`, `tag`, or explicit default.
    If the target is missing and the user did not explicitly request defaults,
@@ -171,7 +180,8 @@ For `sandbox.create`:
 5. Capture its `operation_id`, call `wait_operation`, then call
    `get_operation` and read `result_json`.
 6. Call `create_sandbox` with the requested `owner`, optional `slug`, and
-   resolved source target.
+   resolved source target. Pass optional `configuration` when requested,
+   using the same format as configuration updates below.
 7. Capture the create `operation_id`. If completion may take longer than the
    current turn, tell the user the operation id and current status.
 8. Poll with `wait_operation` and `get_operation` until the create operation is
@@ -202,7 +212,9 @@ For `sandbox.upgrade`:
 1. Collect explicit `slug`.
 2. Collect exactly one target: `branch`, `commit`, `tag`, or latest master.
    Do not treat default, 默认, 默认值, or 缺省 as a sufficient upgrade target.
-3. Call `get_sandbox` and verify the slug exists.
+3. Call `get_sandbox`. Require a running sandbox, or a failed sandbox whose
+   container, database, and filestore still exist. Do not upgrade destroyed
+   sandboxes or ones in the middle of another lifecycle operation.
 4. Call `ensure_sandbox_version` and wait for its operation result.
 5. Call `upgrade_sandbox` with the slug and resolved source target.
 6. Capture the upgrade `operation_id`.
@@ -215,6 +227,45 @@ instead of starting another upgrade.
 
 Do not run `provision_sync_defaults` after upgrade unless the user explicitly
 asks for 信易账户写入.
+
+Upgrade runs `-u all` with `zh_CN` translation overwrite and retains desired
+configuration. A database upgrade failure leaves the runtime stopped.
+
+## Configuration, Restart, and Recovery
+
+For configuration inspection, call `get_sandbox_configuration(slug=...)` and
+report desired/applied revisions, application status, and errors.
+
+For configuration changes:
+
+1. Read the current configuration.
+2. Call `update_sandbox_configuration` with a partial `configuration` object:
+   `{"odoo_options": {"real_odoo_key": "string"}, "additional_modules": ["addon_name"]}`.
+   Use real Odoo option keys and string values. `null` removes an option
+   override; empty strings remain values. An `additional_modules` list
+   replaces the desired list; removing an addon does not uninstall it.
+3. Capture `operation_id`, wait/poll, and inspect the result or error.
+4. Read configuration again to verify desired/applied revisions and status.
+
+The update automatically applies configuration. If application fails, correct
+the desired configuration or use `restart_sandbox` to retry. Restart reapplies
+configuration, ensures addons, and recreates/verifies the same-version runtime;
+source version changes use `upgrade_sandbox`. Capture and track its operation.
+Configuration update and restart accept an optional `idempotency_key`; retain
+the same key when retrying the same intended submission.
+
+To recover an exited container, inspect `get_sandbox` runtime fields, call
+`ensure_sandbox_running`, and track its operation. Report `recovered`,
+`runtime_before`, and `runtime_after` from the result. If the server reports
+`missing_container_recreate_unsupported`, report that limitation; do not
+recreate the container through terminal or Docker commands.
+
+## Inventory Scope
+
+`list_sandboxes` defaults to `scope="running"`. Use `scope="active"` for
+active resources, `scope="history"` for destroyed records, and `scope="all"`
+for the complete registry. Optional `status` is intersected with scope.
+`hedge-sandbox://state/sandboxes` also defaults to running inventory.
 
 ## Module Install Workflow
 
@@ -292,11 +343,15 @@ follows:
 - `sandbox_healthz`
 - `ensure_sandbox_version`
 - `create_sandbox`
+- `get_sandbox_configuration`
+- `update_sandbox_configuration`
+- `restart_sandbox`
 - `upgrade_sandbox`
 - `install_module`
 - `run_odoo_shell`
 - `list_sandboxes`
 - `get_sandbox`
+- `ensure_sandbox_running`
 - `destroy_sandbox`
 - `provision_sync_defaults`
 - `get_operation`
