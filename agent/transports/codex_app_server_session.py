@@ -688,11 +688,11 @@ class CodexAppServerSession:
         self,
         user_input: Any,
         *,
-        turn_timeout: float = 600.0,
+        turn_timeout: Optional[float] = 600.0,
         notification_poll_timeout: float = 0.25,
         post_tool_quiet_timeout: float = 90.0,
     ) -> TurnResult:
-        """Run one turn, honoring interrupts received while startup is pending."""
+        """Run one turn, honoring interrupts even with no deadline (None)."""
         try:
             if self._interrupt_event.is_set():
                 return TurnResult(interrupted=True, thread_id=self._thread_id)
@@ -706,13 +706,17 @@ class CodexAppServerSession:
         self,
         user_input: Any,
         *,
-        turn_timeout: float = 600.0,
+        turn_timeout: Optional[float] = 600.0,
         notification_poll_timeout: float = 0.25,
         post_tool_quiet_timeout: float = 90.0,
     ) -> TurnResult:
         """Send a user message and block until turn/completed, while
         forwarding server-initiated approval requests and projecting items
         into Hermes' messages shape.
+
+        turn_timeout: maximum turn duration, or None for no overall deadline.
+        Explicit interrupts, process-exit detection and the post-tool watchdog
+        remain active when the deadline is disabled.
 
         post_tool_quiet_timeout: if codex emits a tool completion and then
         goes quiet for this many seconds without emitting another item or
@@ -776,7 +780,7 @@ class CodexAppServerSession:
             return result
 
         result.turn_id = submitted_turn_id or None
-        deadline = time.monotonic() + turn_timeout
+        deadline = time.monotonic() + turn_timeout if turn_timeout is not None else None
         turn_complete = False
         # Watch protocol activity, not just materialized transcript messages:
         # reasoning, streaming deltas and running tools may produce no projection.
@@ -804,7 +808,7 @@ class CodexAppServerSession:
                 not turn_id or not result.turn_id or turn_id == result.turn_id
             )
 
-        while time.monotonic() < deadline and not turn_complete:
+        while not turn_complete and (deadline is None or time.monotonic() < deadline):
             if self._interrupt_event.is_set():
                 self._issue_interrupt(result.turn_id)
                 result.interrupted = True

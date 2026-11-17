@@ -28,6 +28,8 @@ class Daemon:
         self.turn_modes = []
         self.think_after_tool = 0.0
         self.finish_turn = None
+        self.tool_runtime_seconds = 0.0
+        self.elapsed_seconds = 0.0
 
     def handle(self, ws):
         for raw in ws:
@@ -94,6 +96,9 @@ class Daemon:
                                 "params": {**note, "command": "git status", "cwd": thread["cwd"]}}))
             approval = json.loads(ws.recv(timeout=10))
             self.approvals.append(approval)
+            # Advance only the session's clock while this tool runs. The RPC
+            # response and approval have already arrived, so startup is done.
+            self.elapsed_seconds += self.tool_runtime_seconds
             if self.finish_turn is not None:
                 assert self.finish_turn.wait(10)
             ws.send(json.dumps({"method": "item/completed", "params": {
@@ -130,8 +135,13 @@ async def eventually(predicate):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("think_after_tool,pause_delivery", [(False, False), (True, False), (False, True)])
-async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_path, monkeypatch, think_after_tool, pause_delivery):
+@pytest.mark.parametrize("think_after_tool,pause_delivery,long_running", [
+    (False, False, False), (True, False, False), (False, True, False),
+    pytest.param(False, False, True, id="long_running"),
+])
+async def test_slack_create_approve_resume_and_terminal_sync_after_restart(
+    tmp_path, monkeypatch, think_after_tool, pause_delivery, long_running,
+):
     import hermes_cli.plugins as plugins
     from gateway.config import HomeChannel, Platform, PlatformConfig
     from gateway.run import GatewayRunner
@@ -139,6 +149,13 @@ async def test_slack_create_approve_resume_and_terminal_sync_after_restart(tmp_p
 
     socket_path = str(tmp_path / "rpc.sock")
     daemon = Daemon()
+    if long_running:
+        import agent.transports.codex_app_server_session as session_module
+
+        daemon.tool_runtime_seconds = 3600.0
+        # Leave asyncio and the wire client's real clock alone. No further
+        # human input arrives while the approved tool runs for a virtual hour.
+        monkeypatch.setattr(session_module, "time", SimpleNamespace(monotonic=lambda: daemon.elapsed_seconds))
     if pause_delivery:
         daemon.finish_turn = threading.Event()
     if think_after_tool:

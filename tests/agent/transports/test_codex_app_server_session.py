@@ -579,7 +579,8 @@ class TestRunTurn:
         assert r.should_retire is True
         assert r.final_text == ""
 
-    def test_interrupt_during_turn_issues_turn_interrupt(self):
+    @pytest.mark.parametrize("turn_timeout", [2.0, None])
+    def test_interrupt_during_turn_issues_turn_interrupt(self, turn_timeout):
         client = FakeClient()
         # Don't queue turn/completed — the loop has to interrupt out
         client.queue_notification(
@@ -601,7 +602,7 @@ class TestRunTurn:
             return {}
 
         client._request_handler = respond
-        r = s.run_turn("loop forever", turn_timeout=2.0)
+        r = s.run_turn("loop forever", turn_timeout=turn_timeout)
         assert r.interrupted is True
         # turn/interrupt was requested with the right turnId
         assert any(
@@ -929,7 +930,8 @@ class TestSessionRetirement:
         r = s.run_turn("hi", turn_timeout=1.0)
         assert r.should_retire is False
 
-    def test_post_tool_quiet_watchdog_trips_and_retires(self):
+    @pytest.mark.parametrize("turn_timeout", [5.0, None])
+    def test_post_tool_quiet_watchdog_trips_and_retires(self, turn_timeout):
         client = FakeClient()
         # One tool completion, then total silence — no further events,
         # no turn/completed. With a tiny post_tool_quiet_timeout the
@@ -947,7 +949,7 @@ class TestSessionRetirement:
         s = make_session(client)
         r = s.run_turn(
             "tool then silence",
-            turn_timeout=5.0,           # would be miserable to wait
+            turn_timeout=turn_timeout,
             notification_poll_timeout=0.02,
             post_tool_quiet_timeout=0.15,
         )
@@ -1236,7 +1238,8 @@ class TestSessionRetirement:
         # Generic model failures don't retire — the session itself is fine
         assert r.should_retire is False
 
-    def test_dead_subprocess_detected_between_iterations(self):
+    @pytest.mark.parametrize("turn_timeout", [2.0, None])
+    def test_dead_subprocess_detected_between_iterations(self, turn_timeout):
         """If codex dies (segfault, OOM, killed by its auth refresh
         thread), the inter-iteration is_alive check breaks the loop
         instead of waiting on a queue that will never fill."""
@@ -1249,7 +1252,7 @@ class TestSessionRetirement:
         client.set_stderr_tail([
             "thread 'tokio-runtime-worker' panicked at 'oauth: invalid_grant'",
         ])
-        r = s.run_turn("x", turn_timeout=2.0,
+        r = s.run_turn("x", turn_timeout=turn_timeout,
                        notification_poll_timeout=0.01)
         assert r.should_retire is True
         # Stderr-derived auth hint takes precedence over generic message

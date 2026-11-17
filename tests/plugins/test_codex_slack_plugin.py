@@ -203,7 +203,7 @@ class FakeSession:
     def ensure_started(self):
         return self.resume_thread_id or self.next_thread_id
 
-    def run_turn(self, text):
+    def run_turn(self, text, *, turn_timeout=600.0):
         if self.on_event:
             self.on_event({"method": "item/started", "params": {"item": {"type": "commandExecution"}}})
         return TurnResult(final_text=f"answer: {text}", thread_id=self.ensure_started(), turn_id="turn-slack")
@@ -857,7 +857,7 @@ async def test_long_result_reuses_progress_and_preserves_all_chunks(plugin, tmp_
         assert len(answer) < 4000 < len(answer.encode("utf-8"))
 
     class LongSession(FakeSession):
-        def run_turn(self, text):
+        def run_turn(self, text, *, turn_timeout=600.0):
             return TurnResult(final_text=answer, thread_id=binding.codex_thread_id, turn_id="long")
 
     manager.session_factory = LongSession
@@ -1011,7 +1011,7 @@ async def test_interrupted_turn_is_not_reported_as_completed(plugin, tmp_path):
     binding = _binding(plugin, manager)
 
     class InterruptedSession(FakeSession):
-        def run_turn(self, text):
+        def run_turn(self, text, *, turn_timeout=600.0):
             return TurnResult(interrupted=True, thread_id=binding.codex_thread_id, turn_id="interrupted")
 
     manager.session_factory = InterruptedSession

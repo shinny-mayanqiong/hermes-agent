@@ -208,7 +208,7 @@ async def test_stop_clears_queue_keeps_running_turn_and_gates_delivery(plugin, t
     prompts = []
 
     class RunningSession(FakeSession):
-        def run_turn(self, text):
+        def run_turn(self, text, *, turn_timeout=600.0):
             prompts.append(text)
             entered.set()
             assert release.wait(5)
@@ -345,7 +345,7 @@ async def test_resume_skips_completed_turn_whose_worker_result_is_pending(plugin
     reading, finish_read = threading.Event(), threading.Event()
 
     class RunningSession(FakeSession):
-        def run_turn(self, text):
+        def run_turn(self, text, *, turn_timeout=600.0):
             entered.set()
             assert release.wait(5)
             return TurnResult(thread_id=binding.codex_thread_id, turn_id="done", final_text="old result")

@@ -898,7 +898,9 @@ class CodexSlackManager(SessionControls, ProgressMirror, SessionBrowser):
                     break
                 session = runtime.session
                 assert session is not None
-                result = await asyncio.to_thread(session.run_turn, item.text)
+                # Autonomous Slack tasks can run for hours without more input.
+                # Keep interrupt/failure detection, but impose no turn deadline.
+                result = await asyncio.to_thread(session.run_turn, item.text, turn_timeout=None)
                 runtime.has_history = bool(result.turn_id) or runtime.has_history
                 runtime.last_active = time.monotonic()
                 self.store.touch(runtime.binding)

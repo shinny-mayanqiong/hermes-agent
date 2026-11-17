@@ -60,6 +60,11 @@ already delivered. Temporary Slack or daemon failures are retried. As with any
 remote delivery, a process crash between sending an answer and saving its
 checkpoint can cause that answer to be delivered again.
 
+Slack-started turns have no overall time limit and can keep working without
+further human input. `idle_timeout_seconds` only reclaims inactive sessions;
+it does not interrupt a running task. Explicit Codex interrupts, process exits,
+and post-tool stall detection still end an affected turn.
+
 The polling interval is a minimum delay between scans; a large catch-up or a
 slow daemon can take longer. Only sessions explicitly bound with `new` or
 `resume` are mirrored. On first binding, the latest turn's output is shown even
