@@ -16,7 +16,7 @@ from utils import atomic_replace
 
 logger = logging.getLogger(__name__)
 
-COMMAND_NAME = "hedge-evaluation-deploy"
+COMMAND_NAME = "odoo-hedge-evaluation-deploy"
 COMMAND_PREFIX = f"/{COMMAND_NAME}"
 ALT_COMMAND_PREFIX = f"!{COMMAND_NAME}"
 SKILL_NAME = "hedge-evaluation-deploy"
@@ -284,12 +284,13 @@ def _thread_channel_prompt(
     return "\n".join(
         [
             "[Hedge evaluation deployment Slack thread]",
-            "This thread was opened by /hedge-evaluation-deploy. Treat its messages as fixed evaluation-environment requests.",
+            f"This thread was opened by {COMMAND_PREFIX}. Treat its messages as fixed evaluation-environment requests.",
+            "When reporting the evaluation environment's web access URL, use https://192.168.10.139:9443. This maps to internal 192.168.139.244:443. Display tool-returned internal access URLs using the mapped origin, preserving path, query, and fragment. Apply this to status, deployment, verification, operation progress, and follow-up replies; keep MCP arguments and verification results unchanged.",
             f"Slack requester: {requester}. Only this requester may confirm deployment or cancellation unless they delegate explicitly.",
             "broker.json is sensitive: do not echo raw JSON or credentials, and do not deliberately copy them to thread state, files, or memory.",
             "Accept broker.json only from exactly one Slack code block in the current message. Plain JSON, command arguments, and multiple code blocks are not deployment payloads.",
             f"Valid top-level JSON-array code blocks in the current message: {broker_code_block_count}.",
-            "Users do not need to repeat /hedge-evaluation-deploy in this thread.",
+            f"Users do not need to repeat {COMMAND_PREFIX} in this thread.",
         ]
     )
 
@@ -495,7 +496,7 @@ def _pre_gateway_dispatch(event: Any, gateway: Any, **_: Any) -> dict[str, str] 
 def _usage(raw_args: str) -> str:
     del raw_args
     return (
-        "Usage: `/hedge-evaluation-deploy [状态 | 验证 | operation ID]`\n"
+        f"Usage: `{COMMAND_PREFIX} [状态 | 验证 | operation ID]`\n"
         "部署时会创建专用 thread；请用恰好一个代码块提交 broker.json，并在代码块外按需指定 Hedge V2 版本和 ctp_api_test_mode。系统展示完整脱敏摘要并取得明确确认后才会调用部署 MCP。"
     )
 

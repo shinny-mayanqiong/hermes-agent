@@ -202,21 +202,22 @@ def test_register_exposes_slack_command_and_hook_without_tools():
     ctx = FakeCtx()
     plugin.register(ctx)
 
-    assert ctx.commands[0][0][0] == "hedge-evaluation-deploy"
+    assert ctx.commands[0][0][0] == "odoo-hedge-evaluation-deploy"
     assert ctx.commands[0][1]["platforms"] == ("slack",)
     assert "状态" in ctx.commands[0][1]["args_hint"]
     assert ctx.tools == []
     assert ctx.hooks[0][0][0] == "pre_gateway_dispatch"
 
 
+@pytest.mark.parametrize("prefix", ["/", "!"])
 @pytest.mark.asyncio
-async def test_command_without_args_creates_private_workflow_thread(tmp_path, monkeypatch):
+async def test_command_without_args_creates_private_workflow_thread(tmp_path, monkeypatch, prefix):
     plugin = _load_plugin()
     monkeypatch.setattr(plugin, "_state_path", lambda: tmp_path / "state.json")
     adapter = FakeSlackAdapter()
 
     await plugin._handle_evaluation_event(
-        _event("/hedge-evaluation-deploy"),
+        _event(f"{prefix}odoo-hedge-evaluation-deploy"),
         _gateway(adapter),
     )
 
@@ -243,7 +244,7 @@ async def test_initial_broker_json_is_not_echoed_or_persisted(tmp_path, monkeypa
     payload = f'部署 [{{"ctp_auth_code":"{secret}"}}]'
 
     await plugin._handle_evaluation_event(
-        _event(f"/hedge-evaluation-deploy {payload}"),
+        _event(f"/odoo-hedge-evaluation-deploy {payload}"),
         _gateway(adapter),
     )
 
@@ -275,7 +276,7 @@ async def test_active_thread_is_bound_to_skill_and_requester(tmp_path, monkeypat
     adapter = FakeSlackAdapter()
     gateway = _gateway(adapter)
 
-    await plugin._handle_evaluation_event(_event("/hedge-evaluation-deploy"), gateway)
+    await plugin._handle_evaluation_event(_event("/odoo-hedge-evaluation-deploy"), gateway)
     thread_ts = adapter.client.messages[0]["ts"]
 
     followup = _event("测评环境现在是什么状态？", thread_id=thread_ts)
@@ -314,7 +315,7 @@ async def test_active_thread_uses_exact_code_block_instead_of_slack_plain_text(
     adapter = FakeSlackAdapter()
     gateway = _gateway(adapter)
 
-    await plugin._handle_evaluation_event(_event("/hedge-evaluation-deploy"), gateway)
+    await plugin._handle_evaluation_event(_event("/odoo-hedge-evaluation-deploy"), gateway)
     thread_ts = adapter.client.messages[0]["ts"]
     followup = _event(slack_text, thread_id=thread_ts)
     followup.raw_message["blocks"] = [
@@ -345,7 +346,7 @@ def test_pre_gateway_dispatch_does_not_bypass_auth(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin, "_state_path", lambda: tmp_path / "state.json")
 
     result = plugin._pre_gateway_dispatch(
-        _event("/hedge-evaluation-deploy 状态"),
+        _event("/odoo-hedge-evaluation-deploy 状态"),
         _gateway(FakeSlackAdapter(), authorized=False),
     )
 

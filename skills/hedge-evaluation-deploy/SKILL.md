@@ -7,7 +7,7 @@ description: Deploy and inspect the fixed Hedge environment from Slack.
 
 Manage the single fixed evaluation environment through the
 `hedge-evaluation-control` MCP server. In Slack, keep the whole workflow in the
-thread opened by `/hedge-evaluation-deploy`.
+thread opened by `/odoo-hedge-evaluation-deploy`.
 
 ## Safety Contract
 
@@ -47,6 +47,20 @@ Hermes normally exposes these tools with an
 Resolve the exact available prefixed name from the current MCP tool list. If
 the MCP is unavailable, report the connection problem and stop; do not bypass
 it.
+
+## Environment Access URL
+
+Use `https://192.168.10.139:9443` whenever reporting the evaluation environment's
+browser access address, including status, deployment, verification, operation
+progress, retries, and delayed follow-up replies.
+
+The forwarding rule is `192.168.139.244:443 -> 192.168.10.139:9443`. If an MCP
+result returns `https://192.168.139.244` or `https://192.168.139.244:443`, show
+`https://192.168.10.139:9443` instead, preserving any path, query, and fragment.
+This mapping changes the displayed access link only. Keep MCP connection
+settings, deployment arguments, operation status, and verification results
+unchanged; the mapped address alone does not establish that the environment is
+healthy.
 
 ## Route the Request
 
@@ -209,6 +223,9 @@ credentials. Its prompt must use the `hedge-evaluation-control` MCP tools, get
 the operation, run verification only after a successful terminal deploy, and
 report a concise sanitized status to the originating Slack thread.
 
+Include the Environment Access URL rule in the job prompt so scheduled replies
+also use `https://192.168.10.139:9443` for environment access links.
+
 Do not restrict the cron job to a toolset that excludes MCP tools. Prefer
 omitting `enabled_toolsets` unless the scheduler explicitly supports an
 MCP/evaluation-control toolset.
@@ -220,3 +237,4 @@ terminal status, effective or pinned Hedge V2 version when known,
 `ctp_api_test_mode` when known, and verification result. State clearly when no
 mutation was performed. Keep the response in the Slack thread and never
 reproduce the full `broker.json`.
+When including an environment access link, follow the Environment Access URL rule.
