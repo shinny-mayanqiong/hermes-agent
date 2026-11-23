@@ -11,6 +11,8 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.config import Platform
+from gateway.platforms.base import MessageEvent, MessageType
+from gateway.session import SessionSource
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -352,3 +354,107 @@ def test_pre_gateway_dispatch_does_not_bypass_auth(tmp_path, monkeypatch):
 
     assert result == {"action": "allow"}
     assert not (tmp_path / "state.json").exists()
+
+
+@pytest.mark.parametrize("text", ["/yolo", "/approve session", "/deny", "/stop", "/help", "/model example", "/tasks"])
+@pytest.mark.asyncio
+async def test_active_thread_preserves_gateway_command_dispatch(text):
+    plugin = _load_plugin()
+    event = MessageEvent(
+        text=text,
+        message_type=MessageType.COMMAND,
+        source=SessionSource(
+            platform=Platform.SLACK,
+            chat_id="C123",
+            user_id="U123",
+            thread_id="100.000",
+            guild_id="T123",
+            chat_type="group",
+        ),
+        raw_message={"team_id": "T123"},
+        reply_to_text='{"ctp_auth_code":"must-not-be-logged"}',
+    )
+    record = plugin._base_record(event, "Alice")
+    record["thread_ts"] = event.source.thread_id
+    await plugin._save_state({"threads": {plugin._thread_key(event): record}})
+    command, args = event.get_command(), event.get_command_args()
+
+    result = plugin._pre_gateway_dispatch(event, _gateway(FakeSlackAdapter()))
+
+    assert result == {"action": "allow"}
+    assert event.get_command() == command
+    assert event.get_command_args() == args
+    assert event.text == text
+    assert event.reply_to_text == plugin._SENSITIVE_REPLY_PLACEHOLDER
+    assert event.auto_skill == plugin.SKILL_NAME
+
+
+@pytest.mark.asyncio
+async def test_thread_yolo_reaches_real_session_approval_guard(tmp_path):
+    from gateway.config import GatewayConfig
+    from gateway.run import GatewayRunner
+    from gateway.session import SessionStore
+    from tools import approval
+
+    plugin = _load_plugin()
+    event = MessageEvent(
+        text="/yolo",
+        source=SessionSource(
+            platform=Platform.SLACK,
+            chat_id="C123",
+            user_id="U123",
+            thread_id="100.000",
+            guild_id="T123",
+            chat_type="group",
+        ),
+        raw_message={"team_id": "T123"},
+    )
+    record = plugin._base_record(event, "Alice")
+    await plugin._save_state({"threads": {plugin._thread_key(event): record}})
+    plugin._pre_gateway_dispatch(event, _gateway(FakeSlackAdapter()))
+    assert event.get_command() == "yolo"
+
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig()
+    runner.session_store = SessionStore(tmp_path / "sessions", runner.config)
+    session_key = runner._session_key_for_source(event.source)
+    approval.clear_session(session_key)
+    token = approval.set_current_session_key(session_key)
+    try:
+        await runner._handle_yolo_command(event)
+        assert approval.is_session_yolo_enabled(session_key)
+        assert not approval.is_session_yolo_enabled(session_key + ":other-thread")
+        assert approval.check_all_command_guards("python -c 'print(1)'", "local")["approved"]
+        await runner._handle_yolo_command(event)
+        assert not approval.is_session_yolo_enabled(session_key)
+    finally:
+        approval.reset_current_session_key(token)
+        approval.clear_session(session_key)
+
+
+def test_command_with_broker_code_block_remains_sensitive():
+    plugin = _load_plugin()
+    event = _event("/yolo\n```broker payload```", thread_id="100.000")
+    payload = '[{"ctp_auth_code":"sensitive-broker-code"}]'
+    event.raw_message["blocks"] = [{
+        "type": "rich_text",
+        "elements": [{
+            "type": "rich_text_preformatted",
+            "elements": [{"type": "text", "text": payload}],
+        }],
+    }]
+
+    plugin._apply_thread_context(event, {"user_id": "U123"})
+
+    assert event.text.startswith(plugin._SENSITIVE_INPUT_PREFIX)
+    assert event.text.endswith(payload)
+    assert plugin._AUTHORITATIVE_BROKER_JSON_MARKER in event.text
+
+
+def test_unknown_slash_text_remains_sensitive():
+    plugin = _load_plugin()
+    event = _event("/unknown-evaluation-command sensitive-broker-code")
+
+    plugin._apply_thread_context(event, {"user_id": "U123"})
+
+    assert event.text.startswith(plugin._SENSITIVE_INPUT_PREFIX)

@@ -2422,6 +2422,7 @@ class SlackAdapter(BasePlatformAdapter):
         # gateway dispatcher) handles it like a normal slash command.  Only
         # rewrite when the first token resolves to a known gateway command
         # so casual messages like "!nice work" pass through unchanged.
+        slack_original_text = original_text
         if original_text.startswith("!"):
             try:
                 from hermes_cli.commands import is_gateway_known_command
@@ -2460,7 +2461,11 @@ class SlackAdapter(BasePlatformAdapter):
                 comparable_blocks = _normalize_slack_autolinks_for_comparison(
                     stripped_blocks
                 )
-                comparable_text = _normalize_slack_autolinks_for_comparison(text)
+                # Compare against Slack's original spelling before !command
+                # normalization, or rich_text repeats the command as arguments.
+                comparable_text = _normalize_slack_autolinks_for_comparison(
+                    slack_original_text
+                )
                 if comparable_blocks and comparable_blocks not in comparable_text:
                     logger.debug(
                         "Slack: extracted additional text from blocks "

@@ -1197,6 +1197,26 @@ class TestBangPrefixCommands:
         assert msg_event.text.startswith("/model gpt-5.4")
         assert msg_event.message_type == MessageType.COMMAND
 
+    @pytest.mark.parametrize("text", ["!yolo", "!approve session", "!model example"])
+    @pytest.mark.asyncio
+    async def test_bang_rich_text_does_not_duplicate_command_or_arguments(self, adapter, text):
+        evt = self._make_event(text, thread_ts="1111111111.000001")
+        evt["blocks"] = [{
+            "type": "rich_text",
+            "elements": [{
+                "type": "rich_text_section",
+                "elements": [{"type": "text", "text": text}],
+            }],
+        }]
+
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/" + text[1:]
+        assert msg_event.get_command_args() == text.partition(" ")[2]
+        assert msg_event.message_type == MessageType.COMMAND
+        assert msg_event.source.thread_id == evt["thread_ts"]
+
     @pytest.mark.asyncio
     async def test_bang_works_inside_thread(self, adapter):
         """The whole point: ``!stop`` inside a thread reply dispatches."""

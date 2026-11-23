@@ -296,6 +296,8 @@ def _thread_channel_prompt(
 
 
 def _apply_thread_context(event: Any, record: dict[str, Any]) -> None:
+    from hermes_cli.commands import is_gateway_known_command
+
     broker_code_blocks = _valid_broker_json_code_blocks(event)
     try:
         raw_text = str(getattr(event, "text", "") or "")
@@ -304,7 +306,15 @@ def _apply_thread_context(event: Any, record: dict[str, Any]) -> None:
                 f"{_AUTHORITATIVE_BROKER_JSON_MARKER}"
                 f"{broker_code_blocks[0]}"
             )
-        event.text = _sensitive_agent_text(raw_text)
+        # Slack has already normalized !commands to /commands. Keep their
+        # leading slash visible to gateway dispatch, including while an agent
+        # is waiting for approval. Broker code blocks above remain sensitive.
+        command = (
+            raw_text.split(maxsplit=1)[0][1:].split("@", 1)[0].lower()
+            if raw_text.startswith("/")
+            else None
+        )
+        event.text = raw_text if is_gateway_known_command(command) else _sensitive_agent_text(raw_text)
     except Exception:
         pass
     try:
