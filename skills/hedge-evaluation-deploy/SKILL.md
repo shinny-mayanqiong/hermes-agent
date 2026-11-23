@@ -1,6 +1,6 @@
 ---
 name: hedge-evaluation-deploy
-description: Deploy and inspect the fixed Hedge environment from Slack.
+description: Deploy and inspect the fixed Hedge environment from Slack, including requested read-only SSH log collection.
 ---
 
 # Hedge Evaluation Deploy
@@ -11,9 +11,15 @@ thread opened by `/odoo-hedge-evaluation-deploy`.
 
 ## Safety Contract
 
-- Use only the `hedge-evaluation-control` MCP tools for evaluation-environment
-  actions. Do not replace them with terminal commands, direct HTTP requests,
-  SSH, or the `odoo-hedge-server` sandbox MCP.
+- Use the `hedge-evaluation-control` MCP tools for deployment, installation,
+  updates, cancellation, and routine status or verification requests. Do not
+  replace these actions with terminal commands, direct HTTP requests, SSH, or
+  the `odoo-hedge-server` sandbox MCP.
+- When the user requests existing evaluation logs or diagnostic evidence,
+  read-only SSH to the fixed evaluation host is allowed. Follow
+  `references/readonly-ssh-evidence.md`. The log request authorizes reading,
+  filtering, and local export; it does not authorize remote changes, service
+  restarts, trading actions, or collecting credentials.
 - Treat every submitted `broker.json` as sensitive. Never paste it back, quote
   `ctp_auth_code`, write it to a local file, call a memory tool with it, or
   deliberately create another persistent copy. Use the inbound conversation
@@ -45,8 +51,9 @@ Hermes normally exposes these tools with an
 - `cancel_evaluation_operation`: cancel an operation when supported.
 
 Resolve the exact available prefixed name from the current MCP tool list. If
-the MCP is unavailable, report the connection problem and stop; do not bypass
-it.
+the MCP is unavailable, report the connection problem and stop the MCP-managed
+action. Requested read-only SSH evidence collection remains available under
+the exception above; it is not a deployment fallback.
 
 ## Environment Access URL
 
@@ -70,6 +77,9 @@ healthy.
   workflow below.
 - For cancellation, show the operation ID and current status, ask the requester
   for explicit cancellation confirmation, then call the cancel tool once.
+- For existing logs, account/process identification, or test-report evidence,
+  use `references/readonly-ssh-evidence.md`. Do not require a new MCP tool or
+  deployment confirmation for this read-only request.
 - If a request mixes deployment with status questions, answer the read-only
   part while collecting the missing deployment data.
 
@@ -232,8 +242,12 @@ MCP/evaluation-control toolset.
 
 ## Final Response
 
-Always include the action performed, operation ID when available, current or
-terminal status, effective or pinned Hedge V2 version when known,
+For log collection, report the confirmed host/account/runtime identity, source
+files and time zone, exported artifacts and line ranges, and any missing
+evidence. Do not equate service health with account-level trading evidence.
+
+For deployment and operation requests, include the action performed, operation
+ID when available, current or terminal status, effective or pinned Hedge V2 version when known,
 `ctp_api_test_mode` when known, and verification result. State clearly when no
 mutation was performed. Keep the response in the Slack thread and never
 reproduce the full `broker.json`.
